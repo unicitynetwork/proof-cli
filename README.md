@@ -35,12 +35,20 @@ Arguments are loaded, in order of precedence, from: flags > variables in shell m
 | `UNICITY_NETWORK` | `--network` | `mainnet` or `testnet2`. Selects the gateway and the bundled trust base for `stamp`. `verify` reads the network from the token; only its `--network` flag overrides that. | `mainnet` |
 | `UNICITY_PRIVATE_KEY` | `--key-file` | secp256k1 private key, 64 hex characters. When set, stamps are signed. | none, stamps are anonymous |
 | `UNICITY_GATEWAY_URL` | `--gateway` | Override the gateway URL only. | preset gateway |
-| `UNICITY_TRUST_BASE` | `--trust-base` | Override the bundled trust base file. | bundled file |
-| `UNICITY_TIMEOUT` | `--timeout` | Seconds to wait for the inclusion proof. | `60` |
+| `UNICITY_TRUST_BASE` | `--trust-base` | Override the bundled trust base file. **Not** read from an automatically discovered `./.env` — see below. | bundled file |
+| `UNICITY_TIMEOUT` | `--timeout` | Seconds to wait for the inclusion proof. At most `2147483`, the longest delay a Node timer can hold. | `60` |
 | | `--out` | Where `stamp` writes the token. `-` writes it to stdout. | `token_<first 16 hex of digest>.cbor` in the current directory |
 | | `--dotenv` | Load this env file instead of `./.env`. | `./.env` if present |
 
 A `.env.example` is in the repository.
+
+`UNICITY_TRUST_BASE` is the one exception to the precedence above. It names the
+root of trust, which decides what every verification means, so it is ignored when
+it comes from a `./.env` that was merely found in the working directory — a token
+shipped next to a `.env` would otherwise verify against whatever trust base the
+sender chose. When that happens the CLI says so on stderr and uses the bundled
+pin. The flag, an explicit `--dotenv`, and a real environment variable all work
+as the table says.
 
 ## Usage
 
@@ -69,7 +77,15 @@ Written        ./token_2cf24dba5fb0a30e.cbor
 
 The hash is 64 hex characters, upper or lower case, with or without a `0x` prefix. `--out -` writes the raw token bytes to stdout. Existing files are not overwritten unless you pass `--force`.
 
+The destination is checked before the request goes out, so a mistyped or
+unwritable `--out` fails with exit code 2 while nothing has been spent.
+
 If the inclusion proof does not arrive within the timeout, `stamp` exits with code 3 and nothing is written. The network may still certify the request, but the CLI does not track it: run `stamp` again, or raise `--timeout` on a slow connection. A gateway answer of HTTP 429 means the API key's quota is exhausted for now; that is also exit code 3.
+
+Should the write fail anyway — a full disk, or permissions changing underneath —
+the stamp has already been certified and paid for, so the token is printed to
+stderr as hex rather than lost. `verify` and `inspect` both accept hex, so saving
+that text recovers the stamp in full; there is no need to stamp again.
 
 ### Signed stamps
 
@@ -97,8 +113,9 @@ cat document.cbor | unicity-timestamp verify -              # from stdin; binary
 ```
 
 ```
-Status         OK  (inclusion proof, consensus signatures and payload verified against the mainnet trust base)
+Status         OK  (inclusion proof, consensus signatures and payload verified against the bundled mainnet trust base)
 Network        mainnet (1)
+Trust base     bundled mainnet pin
 Hash           SHA-256 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
 Expected hash  matches
 Signer         031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f
@@ -108,6 +125,8 @@ Token id       321276fcfb19a925b6e5050d5d5de15c82c56dfe7650cc8d0ae6cf7fc336470d
 ```
 
 Verification is offline. The CLI picks the trust base that matches the token's network, so a testnet2 token verifies without flags. The first line is the verdict: `Status OK` with exit code 0, or `Status FAIL: <reason>` with exit code 1. Without `--file` or `--hash` the token is checked for validity only; the `Expected hash` line reminds you that it was not tied to a document.
+
+The `Trust base` line says which root of trust produced that verdict — `bundled <network> pin`, or the path of an override. It is worth reading: a verdict is only as good as the trust base behind it, and `OK` against someone else's trust base means nothing. For that reason the root of trust is never taken from a `.env` file found in the working directory; pass `--trust-base` to choose one deliberately.
 
 ### Inspect
 
