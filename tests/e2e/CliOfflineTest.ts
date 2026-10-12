@@ -16,15 +16,30 @@ describe('unicity-timestamp (offline)', () => {
   it(
     'prints help and version',
     async () => {
-      const [help, version] = await Promise.all([runCli(['--help'], { cwd }), runCli(['--version'], { cwd })]);
+      const [help, version, short, oldShort] = await Promise.all([
+        runCli(['--help'], { cwd }),
+        runCli(['--version'], { cwd }),
+        runCli(['-v'], { cwd }),
+        runCli(['-V'], { cwd }),
+      ]);
       expect(help.code).toBe(0);
       expect(help.stdout).toContain('stamp');
       expect(help.stdout).toContain('verify');
-      expect(version.code).toBe(0);
+      expect(help.stdout).toContain('-v, --version');
+
       // Read from the manifest rather than written out, so a release bump does
       // not have to remember to come back and edit this line.
       const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as { version: string };
+      expect(version.code).toBe(0);
       expect(version.stdout.trim()).toEqual(manifest.version);
+      expect(short.code).toBe(0);
+      expect(short.stdout.trim()).toEqual(manifest.version);
+
+      // Commander's default was `-V`, and it will not accept two short flags on
+      // one option, so the uppercase form is deliberately gone rather than kept
+      // as an alias. Asserted so the trade is visible if anyone reverses it.
+      expect(oldShort.code).toBe(2);
+      expect(oldShort.stderr).toContain("unknown option '-V'");
     },
     TIMEOUT,
   );

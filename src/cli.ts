@@ -25,7 +25,11 @@ const program = new Command();
 program
   .name('unicity-timestamp')
   .description('Timestamp a SHA-256 hash on the Unicity Network and verify the resulting token offline.')
-  .version(VERSION)
+  // Commander defaults the version option to `-V`, keeping `-v` free for a
+  // `--verbose` this CLI does not have. `node -v` and `npm -v` are what people
+  // reach for, so the short flag is lowercase here. Commander refuses two short
+  // flags on one option, so `-V` is given up rather than kept as an alias.
+  .version(VERSION, '-v, --version')
   .option('--json', 'machine-readable output on stdout; everything else goes to stderr')
   .option('--dotenv <path>', 'load this env file instead of ./.env')
   .exitOverride()
