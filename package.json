@@ -7,7 +7,10 @@
     "unicity-timestamp": "lib/cli.js"
   },
   "exports": {
-    ".": "./lib/lib/index.js"
+    ".": {
+      "types": "./lib/lib/index.d.ts",
+      "default": "./lib/lib/index.js"
+    }
   },
   "files": [
     "lib/**/*",
@@ -28,7 +31,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/unicitynetwork/timestamp-cli.git"
+    "url": "git+https://github.com/unicitynetwork/timestamp-cli.git"
   },
   "keywords": [
     "unicity",
@@ -38,6 +41,9 @@
     "cli"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "homepage": "https://github.com/unicitynetwork/timestamp-cli#readme",
   "bugs": {
     "url": "https://github.com/unicitynetwork/timestamp-cli/issues"

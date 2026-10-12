@@ -9,14 +9,18 @@ Timestamping service on Unicity network. Tokens are standard Unicity tokens prod
 
 ## Installation
 
-The package is not on the npm registry yet (see the appendix on deferred decisions). Install from GitHub:
-
 ```bash
-npm install -g github:unicitynetwork/timestamp-cli
+npm install -g @unicitylabs/timestamp-cli
 unicity-timestamp --help
 ```
 
-Or locally:
+Or run it without installing:
+
+```bash
+npx @unicitylabs/timestamp-cli --help
+```
+
+To work from a checkout instead:
 
 ```bash
 git clone https://github.com/unicitynetwork/timestamp-cli.git
@@ -160,7 +164,7 @@ unicity-timestamp stamp --file document.pdf --gateway https://gateway.example --
 unicity-timestamp stamp --file document.pdf --gateway http://localhost:3000 --allow-insecure   # local aggregator only
 ```
 
-The testnet2 key above is the shared public demo key from the SDK README; capacity is limited. Trust bases for mainnet and testnet2 ship inside the package. The CLI never downloads a trust base at run time.
+The testnet2 key above is the shared public demo key published in the [sphere-sdk README](https://github.com/unicity-sphere/sphere-sdk/blob/main/README.md#api-key), where it is documented as public rather than secret; capacity is shared, so get your own key for sustained use. Trust bases for mainnet and testnet2 ship inside the package. The CLI never downloads a trust base at run time.
 
 ## What a stamp proves
 
@@ -245,10 +249,9 @@ Verification runs the SDK's checks on the genesis: transaction hash and certific
 
 ### Deferred decisions
 
-These are recorded here so they are not forgotten; none blocks using the tool from a checkout.
+These are recorded here so they are not forgotten; none blocks using the tool.
 
-1. **npm registry and package name.** Publishing to the npm registry, and the final package name, are deferred. `@unicitylabs/timestamp-cli` with the binary `unicity-timestamp` is the working proposal. Until then, install from GitHub as shown above.
-2. **Token type registration.** The timestamp token type is fixed and deterministic:
+1. **Token type registration.** The timestamp token type is fixed and deterministic:
 
    ```
    TIMESTAMP_TOKEN_TYPE = SHA-256("unicity-timestamp")
