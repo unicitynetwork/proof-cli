@@ -24,10 +24,12 @@
     "lint:fix": "eslint \"src/**/*\" \"tests/**/*\" --fix",
     "prepare": "npm run build",
     "pretest": "npm run build",
+    "sync-version": "node scripts/sync-version.mjs",
     "test": "jest",
     "test:e2e": "jest --testPathPatterns=tests/e2e",
     "test:unit": "jest --testPathPatterns=tests/unit",
-    "trust-bases:update": "node scripts/update-trust-bases.mjs"
+    "trust-bases:update": "node scripts/update-trust-bases.mjs",
+    "version": "node scripts/sync-version.mjs && git add src/version.ts"
   },
   "repository": {
     "type": "git",

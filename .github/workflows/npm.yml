@@ -1,0 +1,196 @@
+name: Release
+
+# Started by hand, because deciding to publish is a decision. Everything after
+# that is automatic: the version is incremented, committed, tagged, published and
+# pushed by this workflow, so package.json, the git tag and the registry cannot
+# drift apart the way they do when a human edits one of the three.
+#
+# Prerequisites, once:
+#
+#   * The `npm-publish` environment exists with `main` as its only allowed
+#     deployment branch. See the note on the job below for why this is the real
+#     restriction rather than anything written in this file.
+#   * The package exists on the registry and names this workflow as its trusted
+#     publisher (npmjs.com > the package > Settings > Trusted Publisher;
+#     repository `unicitynetwork/timestamp-cli`, workflow `npm.yml`, environment
+#     `npm-publish`). npm will not accept a trusted publisher for a package that
+#     has never been published, so the first release is published by hand and
+#     every release after it runs from here.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact version to publish, e.g. 0.2.0. Leave empty to increment automatically.'
+        required: false
+        type: string
+      bump:
+        description: 'Which part to increment when no exact version is given.'
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+# One release at a time, and never cancelled part way: two overlapping runs
+# would both compute a bump from the same starting commit, and the second push
+# would be rejected as non-fast-forward after the first had already published —
+# leaving a published version with no bump commit and no tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, publish and tag
+    runs-on: ubuntu-latest
+    # This is what actually restricts releases to `main`, and it has to live
+    # outside the workflow file to mean anything: a dispatch may name any ref, and
+    # GitHub runs the workflow definition *from that ref*, so any check written
+    # here is editable by whoever pushed the branch being released. The
+    # `npm-publish` environment allows only `main` as a deployment branch, which
+    # GitHub enforces before the job starts, and npm can pin the trusted publisher
+    # to the same environment so a token minted anywhere else is refused.
+    #
+    # The environment must exist with that branch policy before this workflow is
+    # used. GitHub silently creates an unprotected environment on first reference,
+    # which would look like a control while being none.
+    environment: npm-publish
+    permissions:
+      # The bump commit and the tag are pushed from here.
+      contents: write
+      # Trusted publishing: npm exchanges this OIDC token for a short-lived
+      # credential, so no npm token is stored in the repository.
+      id-token: write
+    steps:
+      # Not a security control — the environment above is. This only turns one
+      # specific mistake into a clear message: dispatching against a tag is
+      # accepted by the API, gives a detached HEAD, and would end with a push
+      # trying to move the tag it came from, after the publish had gone through.
+      - name: Require a branch
+        if: github.ref_type != 'branch'
+        env:
+          DISPATCH_REF_TYPE: ${{ github.ref_type }}
+          DISPATCH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo "This workflow releases from a branch; it was dispatched against the ${DISPATCH_REF_TYPE} '${DISPATCH_REF_NAME}'." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          # The branch by name, not the commit the dispatch captured. A run that
+          # waited on the concurrency lock would otherwise build the tree from
+          # before the release it queued behind, bump from a stale version, and
+          # fail its push after having already published.
+          ref: ${{ github.ref_name }}
+          # Tags are needed so `npm version` can see whether the one it is about
+          # to create already exists.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      # The input reaches the shell through the environment, never through `${{ }}`
+      # interpolation: a value carrying a quote would otherwise close the string
+      # and run as code, on a runner holding repository-write and publishing
+      # rights.
+      - name: Reject a malformed explicit version
+        if: inputs.version != ''
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$REQUESTED_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo 'Requested version is not a semver version.' >&2
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Configure the committer
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      # Updates package.json and package-lock.json together, regenerates
+      # src/version.ts through the `version` lifecycle script, commits all of it,
+      # and creates the tag. Doing it in one step is the point: a hand-edited
+      # package.json leaves the lock stale, the CLI reporting the old version, and
+      # the tag easy to forget.
+      - name: Increment, commit and tag
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_BUMP: ${{ inputs.bump }}
+        run: |
+          target="${REQUESTED_VERSION:-$REQUESTED_BUMP}"
+          npm version "$target" --message 'Release as %s'
+          version="$(node -p 'require("./package.json").version')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # A prerelease must not land on `latest`, or it becomes what everyone
+          # gets from a plain `npm install`. The explicit-version input accepts
+          # one, so the tag is chosen from the version rather than assumed.
+          case "$version" in
+            *-*) echo 'dist_tag=next' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'dist_tag=latest' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # Built and tested after the bump, so what is verified is what is published.
+      # Running these first would check a tree at the previous version and leave
+      # the bumped one — including the regenerated src/version.ts, which
+      # tests/unit/VersionTest.ts checks against the manifest — untested.
+      - run: npm run build
+
+      - run: npm run build:check
+
+      - run: npm run lint
+
+      # The network suite skips itself without UNICITY_TEST_API_KEY, so this is
+      # the unit and offline coverage. Releases do not depend on a live gateway.
+      - run: npm test
+
+      # Nothing has left the runner yet, so a version that is already on the
+      # registry can still be refused without having published or pushed
+      # anything. Re-running the workflow after a partial failure lands here.
+      - name: Refuse a version that is already published
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          if npm view "@unicitylabs/timestamp-cli@${version}" version >/dev/null 2>&1; then
+            echo "@unicitylabs/timestamp-cli@${version} is already on the registry." >&2
+            exit 1
+          fi
+
+      # The irreversible step. `--access public` is required for the first public
+      # publish of a scoped package and is a no-op afterwards.
+      - name: Publish
+        run: npm publish --access public --tag '${{ steps.version.outputs.dist_tag }}'
+
+      # After the publish, so a failed publish leaves no tag claiming a version
+      # that was never released. The reverse order is worse: if this push fails
+      # the tag can be recreated by hand, whereas a published version cannot be
+      # withdrawn.
+      # The branch name reaches the shell through the environment and is quoted,
+      # the same reason the version input does: a name may legitimately contain
+      # characters the shell would otherwise act on, and this step runs after the
+      # publish, where a failure is expensive.
+      - name: Push the bump and the tag
+        env:
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: git push --follow-tags origin "HEAD:refs/heads/${RELEASE_BRANCH}"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          # Marked the same way the dist tag was chosen, so the two agree.
+          prerelease=''
+          if [ '${{ steps.version.outputs.dist_tag }}' != 'latest' ]; then
+            prerelease='--prerelease'
+          fi
+          gh release create "v${version}" \
+            --title "v${version}" \
+            --notes "https://www.npmjs.com/package/@unicitylabs/timestamp-cli/v/${version}" \
+            --verify-tag $prerelease
