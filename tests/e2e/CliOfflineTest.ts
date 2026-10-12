@@ -21,7 +21,10 @@ describe('unicity-timestamp (offline)', () => {
       expect(help.stdout).toContain('stamp');
       expect(help.stdout).toContain('verify');
       expect(version.code).toBe(0);
-      expect(version.stdout.trim()).toEqual('0.1.0');
+      // Read from the manifest rather than written out, so a release bump does
+      // not have to remember to come back and edit this line.
+      const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as { version: string };
+      expect(version.stdout.trim()).toEqual(manifest.version);
     },
     TIMEOUT,
   );
