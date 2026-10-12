@@ -47,6 +47,20 @@ export interface INetworkSelection {
 }
 
 /**
+ * Where the root of trust came from. A union rather than a pair of optional
+ * fields, so a reader cannot be handed a bundled network name and a file path at
+ * once and have to guess which one was used.
+ */
+export type TrustBaseSource =
+  { readonly kind: 'bundled'; readonly network: NetworkName } | { readonly kind: 'file'; readonly path: string };
+
+/** A trust base together with where it came from. */
+export interface ITrustBaseChoice {
+  readonly source: TrustBaseSource;
+  readonly trustBase: RootTrustBase;
+}
+
+/**
  * @param {string} value Candidate name.
  * @returns {boolean} True if the value names a bundled network.
  */

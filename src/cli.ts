@@ -8,6 +8,7 @@ import { runStamp } from './commands/stamp.js';
 import { IVerifyFlags, runVerify } from './commands/verify.js';
 import { IStampFlags, loadEnvironment } from './config.js';
 import { describeError, EXIT_USAGE, toExitCode } from './errors.js';
+import { warningLine } from './output.js';
 import { VERSION } from './version.js';
 
 interface IGlobalFlags {
@@ -29,7 +30,17 @@ program
   .option('--dotenv <path>', 'load this env file instead of ./.env')
   .exitOverride()
   .hook('preAction', () => {
-    loadEnvironment(program.opts<IGlobalFlags>().dotenv);
+    const loaded = loadEnvironment(program.opts<IGlobalFlags>().dotenv);
+    if (loaded.refusedTrustBasePath !== undefined) {
+      // Said out loud rather than dropped quietly: whoever put it there needs to
+      // know why it had no effect, and anyone else needs to know it was tried.
+      process.stderr.write(
+        warningLine(
+          `ignored UNICITY_TRUST_BASE=${loaded.refusedTrustBasePath} from ./.env; the root of trust is not ` +
+            'taken from an env file found in the working directory. Pass --trust-base, or --dotenv to opt in.',
+        ),
+      );
+    }
   });
 
 function context(): ICommandContext {

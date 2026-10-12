@@ -2,7 +2,7 @@ import { ICommandContext } from './context.js';
 import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
 import { INetworkFlags, resolveDigest, resolveTrustBaseOverride } from '../config.js';
 import { EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
-import { bundledTrustBase, networkNameForId } from '../lib/networks.js';
+import { bundledTrustBase, ITrustBaseChoice, networkNameForId, TrustBaseSource } from '../lib/networks.js';
 import { describeToken, ITimestampVerificationResult, verificationFailure, verify } from '../lib/TimestampClient.js';
 import { toJsonLine, verifyJson, verifyText } from '../output.js';
 
@@ -11,8 +11,12 @@ export interface IVerifyFlags extends INetworkFlags {
   readonly hash?: string;
 }
 
-function report(context: ICommandContext, result: ITimestampVerificationResult): number {
-  context.stdout.write(context.json ? toJsonLine(verifyJson(result)) : `${verifyText(result)}\n`);
+function report(
+  context: ICommandContext,
+  result: ITimestampVerificationResult,
+  source: TrustBaseSource | null,
+): number {
+  context.stdout.write(context.json ? toJsonLine(verifyJson(result, source)) : `${verifyText(result, source)}\n`);
   return result.status === 'OK' ? EXIT_OK : EXIT_VERIFICATION_FAILED;
 }
 
@@ -32,18 +36,22 @@ export async function runVerify(file: string, flags: IVerifyFlags, context: ICom
   }
   const token = decoded.token;
 
-  let trustBase = await resolveTrustBaseOverride(flags);
-  if (trustBase === undefined) {
+  let choice = await resolveTrustBaseOverride(flags);
+  if (choice === undefined) {
     const name = networkNameForId(token.networkId.id);
     if (name === undefined) {
       return report(
         context,
         verificationFailure(describeToken(token), `unknown network id ${token.networkId.id}; pass --trust-base`),
+        null,
       );
     }
-    trustBase = bundledTrustBase(name);
+    choice = {
+      source: { kind: 'bundled', network: name },
+      trustBase: bundledTrustBase(name),
+    } satisfies ITrustBaseChoice;
   }
 
   const expectedDigest = await resolveDigest(flags.hash, flags.file, '--hash');
-  return report(context, await verify(token, trustBase, { expectedDigest }));
+  return report(context, await verify(token, choice.trustBase, { expectedDigest }), choice.source);
 }

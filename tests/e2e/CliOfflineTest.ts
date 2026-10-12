@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { runCli } from '../support/cli.js';
@@ -38,6 +38,10 @@ describe('unicity-timestamp (offline)', () => {
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--network', 'devnet'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--gateway', 'http://127.0.0.1:9'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--timeout', '0'],
+        ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--timeout', '2147484'],
+        // A mistyped --out directory is the realistic way to reach a write failure
+        // after the stamp has been billed, so it has to be caught here instead.
+        ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--out', '/nonexistent-dir-xyzzy/token.cbor'],
         ['verify', '/nonexistent.cbor'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--dotenv', '/nonexistent.env'],
         ['nonsense'],
@@ -127,6 +131,70 @@ describe('unicity-timestamp (offline)', () => {
       expect(piped.code).toBe(0);
       expect(piped.stdout.trim()).toMatch(/^[0-9a-f]{64}$/);
       expect(piped.stderr).toEqual('');
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'writes a forced key to a new 0600 inode rather than into the old one',
+    async () => {
+      // `writeFile`'s mode applies only when a file is created, so overwriting in
+      // place would fill the existing inode while it still carried the old
+      // permissions. Narrowing it afterwards is not enough: a reader that opened
+      // the file first keeps its descriptor across the change. The forced path has
+      // to land on a different inode, which is what this asserts.
+      const keyFile = path.join(cwd, 'loose.key');
+      await writeFile(keyFile, 'placeholder\n', { mode: 0o600 });
+      await chmod(keyFile, 0o644);
+      const before = await stat(keyFile);
+      expect(before.mode & 0o777).toBe(0o644);
+
+      const forced = await runCli(['keygen', '--out', keyFile, '--force'], { cwd });
+      expect(forced.code).toBe(0);
+      expect(forced.stdout).toContain('mode 0600');
+
+      const after = await stat(keyFile);
+      expect(after.mode & 0o777).toBe(0o600);
+      expect(after.ino).not.toEqual(before.ino);
+      expect((await readFile(keyFile, 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/);
+
+      // No staging file left in the directory.
+      expect((await readdir(cwd)).filter((name) => name.startsWith('.loose.key.'))).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'ignores a trust base named by a .env found in the working directory',
+    async () => {
+      // A token plus a .env naming the trust base that validates it would
+      // otherwise be a complete forgery kit, and the verdict would not say so.
+      const directory = await tempDir('timestamp-cli-dotenv-');
+      const mainnetTrustBase = path.resolve('src/trust-bases/bft-trustbase.mainnet.json');
+      const fixture = path.resolve('tests/fixtures/testnet2-anonymous.cbor');
+      await writeFile(path.join(directory, '.env'), `UNICITY_TRUST_BASE=${mainnetTrustBase}\n`);
+
+      const ignored = await runCli(['verify', fixture, '--json'], { cwd: directory });
+      expect(ignored.code).toBe(0);
+      expect(JSON.parse(ignored.stdout)).toMatchObject({
+        status: 'OK',
+        trustBase: { bundledNetwork: 'testnet2', path: null, source: 'bundled' },
+      });
+      expect(ignored.stderr).toContain('ignored UNICITY_TRUST_BASE');
+
+      // The same override, asked for explicitly, still applies — and the verdict
+      // names the file rather than wearing the bundled pin's name.
+      const explicit = await runCli(['verify', fixture, '--trust-base', mainnetTrustBase], { cwd: directory });
+      expect(explicit.code).toBe(1);
+      expect(explicit.stdout).toContain(mainnetTrustBase);
+      expect(explicit.stdout).toContain('override, not the bundled pin');
+
+      const viaDotenv = await runCli(['--dotenv', path.join(directory, '.env'), 'verify', fixture, '--json'], {
+        cwd: directory,
+      });
+      expect(JSON.parse(viaDotenv.stdout)).toMatchObject({
+        trustBase: { bundledNetwork: null, path: mainnetTrustBase, source: 'file' },
+      });
     },
     TIMEOUT,
   );

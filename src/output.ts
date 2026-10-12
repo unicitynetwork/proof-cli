@@ -1,7 +1,7 @@
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 
-import { networkNameForId } from './lib/networks.js';
+import { networkNameForId, TrustBaseSource } from './lib/networks.js';
 import { ITimestampDescription, ITimestampVerificationResult } from './lib/TimestampClient.js';
 
 /** Minimal sink the commands write to; process.stdout and process.stderr satisfy it. */
@@ -42,12 +42,20 @@ export interface IStampJson extends Omit<IDescriptionJson, 'network'> {
   readonly token: string;
 }
 
+/** Which root of trust a verdict was produced against, as plain data. */
+export interface ITrustBaseJson {
+  readonly bundledNetwork: string | null;
+  readonly path: string | null;
+  readonly source: 'bundled' | 'file';
+}
+
 export interface IVerifyJson extends IDescriptionJson {
   readonly command: 'verify';
   readonly details: IResultJson | null;
   readonly expectedHashMatches: boolean | null;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
+  readonly trustBase: ITrustBaseJson | null;
 }
 
 export interface IInspectJson extends IDescriptionJson {
@@ -115,6 +123,48 @@ export function warningLine(message: string): string {
   return `warning: ${message}\n`;
 }
 
+/**
+ * Last resort for a stamp that was certified but could not be written. `verify`
+ * and `inspect` both read hex text, so this is a complete, usable copy.
+ *
+ * @param {Uint8Array} bytes Encoded token.
+ * @returns {string} Message and token hex, for stderr.
+ */
+export function recoveryLines(bytes: Uint8Array): string {
+  return [
+    'error: the stamp was certified but could not be written.',
+    'Save the token below; `unicity-timestamp verify` accepts hex text.',
+    HexConverter.encode(bytes),
+    '',
+  ].join('\n');
+}
+
+/**
+ * @param {TrustBaseSource|null} source Where the root of trust came from, or null if none was selected.
+ * @returns {string} `bundled mainnet pin`, or the path of an override.
+ */
+export function trustBaseLabel(source: TrustBaseSource | null): string {
+  if (source === null) {
+    return 'none selected';
+  }
+  return source.kind === 'bundled'
+    ? `bundled ${source.network} pin`
+    : `${source.path}  (override, not the bundled pin)`;
+}
+
+/**
+ * @param {TrustBaseSource|null} source Where the root of trust came from, or null if none was selected.
+ * @returns {ITrustBaseJson|null} The same provenance as plain data.
+ */
+export function trustBaseJson(source: TrustBaseSource | null): ITrustBaseJson | null {
+  if (source === null) {
+    return null;
+  }
+  return source.kind === 'bundled'
+    ? { bundledNetwork: source.network, path: null, source: 'bundled' }
+    : { bundledNetwork: null, path: source.path, source: 'file' };
+}
+
 function hashLabel(description: ITimestampDescription): string {
   return description.payload
     ? `SHA-256 ${HexConverter.encode(description.payload.digest)}`
@@ -158,18 +208,23 @@ export function stampText(description: ITimestampDescription, gatewayUrl: string
 
 /**
  * @param {ITimestampVerificationResult} result Verification outcome.
+ * @param {TrustBaseSource} source Root of trust the verdict was produced against.
  * @returns {string} Human summary of a verification, with the SDK result tree on failure.
  */
-export function verifyText(result: ITimestampVerificationResult): string {
-  const network = networkName(result.networkId.id);
+export function verifyText(result: ITimestampVerificationResult, source: TrustBaseSource | null): string {
+  // Named after the trust base that was actually used, never after the token's own
+  // network id: a token carries whatever id its maker chose, so reading the name
+  // off the token would let an override wear the bundled pin's name.
+  const against = source?.kind === 'bundled' ? `the bundled ${source.network} trust base` : `${source?.path}`;
   const lines = [
     line(
       'Status',
       result.status === 'OK'
-        ? `OK  (inclusion proof, consensus signatures and payload verified against the ${network} trust base)`
+        ? `OK  (inclusion proof, consensus signatures and payload verified against ${against})`
         : `FAIL: ${result.reason ?? 'verification failed'}`,
     ),
     line('Network', networkLabel(result.networkId.id)),
+    line('Trust base', trustBaseLabel(source)),
     line('Hash', hashLabel(result)),
   ];
   if (result.expectedDigestMatches === null) {
@@ -273,7 +328,7 @@ export function stampJson(
   };
 }
 
-export function verifyJson(result: ITimestampVerificationResult): IVerifyJson {
+export function verifyJson(result: ITimestampVerificationResult, source: TrustBaseSource | null): IVerifyJson {
   return {
     command: 'verify',
     expectedHashMatches: result.expectedDigestMatches,
@@ -281,6 +336,7 @@ export function verifyJson(result: ITimestampVerificationResult): IVerifyJson {
     status: result.status,
     ...descriptionJson(result),
     details: result.details ? resultTreeJson(result.details) : null,
+    trustBase: trustBaseJson(source),
   };
 }
 

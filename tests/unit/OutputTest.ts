@@ -87,20 +87,39 @@ describe('output', () => {
       });
       expect(typeof json.referenceTime).toBe('string');
 
+      const bundled = { kind: 'bundled', network: 'testnet2' } as const;
       const ok = await verify(token, trustBase, { expectedDigest: TEST_DIGEST });
-      expect(verifyText(ok)).toContain(
-        'Status         OK  (inclusion proof, consensus signatures and payload verified against the unknown trust base)',
+      expect(verifyText(ok, bundled)).toContain(
+        'Status         OK  (inclusion proof, consensus signatures and payload verified against the bundled testnet2 trust base)',
       );
-      expect(verifyText(ok)).toContain('Expected hash  matches');
+      expect(verifyText(ok, bundled)).toContain('Trust base     bundled testnet2 pin');
+      expect(verifyText(ok, bundled)).toContain('Expected hash  matches');
       const unchecked = await verify(token, trustBase);
-      expect(verifyText(unchecked)).toContain('Expected hash  not checked; pass --file or --hash');
-      expect(verifyJson(ok)).toMatchObject({
+      expect(verifyText(unchecked, bundled)).toContain('Expected hash  not checked; pass --file or --hash');
+      expect(verifyJson(ok, bundled)).toMatchObject({
         command: 'verify',
         expectedHashMatches: true,
         reason: null,
         status: 'OK',
+        trustBase: { bundledNetwork: 'testnet2', path: null, source: 'bundled' },
       });
-      expect(verifyJson(ok).details?.status).toEqual('OK');
+      expect(verifyJson(ok, bundled).details?.status).toEqual('OK');
+
+      // No trust base could be selected at all, which is how `verify` reports a
+      // token whose network id matches no bundled pin.
+      expect(verifyText(ok, null)).toContain('Trust base     none selected');
+      expect(verifyJson(ok, null).trustBase).toBeNull();
+
+      // An override must never be able to present itself as the bundled pin.
+      const override = { kind: 'file', path: '/tmp/rogue.json' } as const;
+      expect(verifyText(ok, override)).toContain('Trust base     /tmp/rogue.json  (override, not the bundled pin)');
+      expect(verifyText(ok, override)).toContain('verified against /tmp/rogue.json');
+      expect(verifyText(ok, override)).not.toContain('the bundled testnet2 trust base');
+      expect(verifyJson(ok, override).trustBase).toEqual({
+        bundledNetwork: null,
+        path: '/tmp/rogue.json',
+        source: 'file',
+      });
 
       const inspected = inspectText(description);
       expect(inspected.startsWith('UNVERIFIED')).toBe(true);

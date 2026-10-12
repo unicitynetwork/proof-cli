@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
@@ -61,6 +61,22 @@ describe('parseTimeoutSeconds', () => {
   it.each(['0', '-1', '1.5', 'abc', ''])('rejects %p', (input) => {
     expect(() => parseTimeoutSeconds(input)).toThrow(/positive integer/);
   });
+
+  // AbortSignal.timeout is constructed after the certification request has been
+  // submitted and billed, so a delay Node cannot represent would certify the
+  // digest and then abandon the wait. These have to fail before the network call.
+  it.each(['2147484', '4294967', '99999999', '1000000000'])('rejects %p as too large to wait for', (input) => {
+    expect(() => parseTimeoutSeconds(input)).toThrow(/at most 2147483 seconds/);
+  });
+
+  it('keeps the largest accepted delay inside the range a Node timer can hold', () => {
+    // Beyond this a timer is silently reduced to 1ms rather than refused, so the
+    // bound has to be asserted numerically; nothing throws to catch it.
+    const NODE_TIMEOUT_MAX_MS = 2 ** 31 - 1;
+    expect(parseTimeoutSeconds('2147483')).toBe(2_147_483_000);
+    expect(parseTimeoutSeconds('2147483')).toBeLessThanOrEqual(NODE_TIMEOUT_MAX_MS);
+    expect(parseTimeoutSeconds(undefined)).toBeLessThanOrEqual(NODE_TIMEOUT_MAX_MS);
+  });
 });
 
 describe('hashFile and resolveDigest', () => {
@@ -107,12 +123,25 @@ describe('resolveTrustBaseOverride', () => {
   });
 
   it('honours --network, --trust-base and UNICITY_TRUST_BASE', async () => {
-    expect((await resolveTrustBaseOverride({ network: 'testnet2' }, {}))?.networkId.id).toBe(4);
+    expect((await resolveTrustBaseOverride({ network: 'testnet2' }, {}))?.trustBase.networkId.id).toBe(4);
     const file = path.join(await tempDir(), 'tb.json');
     await writeFile(file, JSON.stringify(NETWORKS.testnet2.trustBaseJson));
-    expect((await resolveTrustBaseOverride({ trustBase: file }, {}))?.networkId.id).toBe(4);
-    expect((await resolveTrustBaseOverride({}, { UNICITY_TRUST_BASE: file }))?.networkId.id).toBe(4);
+    expect((await resolveTrustBaseOverride({ trustBase: file }, {}))?.trustBase.networkId.id).toBe(4);
+    expect((await resolveTrustBaseOverride({}, { UNICITY_TRUST_BASE: file }))?.trustBase.networkId.id).toBe(4);
     await expect(resolveTrustBaseOverride({ network: 'devnet' }, {})).rejects.toThrow(/Unknown network 'devnet'/);
+  });
+
+  it('reports where the trust base came from, so a verdict can disclose it', async () => {
+    expect((await resolveTrustBaseOverride({ network: 'testnet2' }, {}))?.source).toEqual({
+      kind: 'bundled',
+      network: 'testnet2',
+    });
+    const file = path.join(await tempDir(), 'tb.json');
+    await writeFile(file, JSON.stringify(NETWORKS.testnet2.trustBaseJson));
+    expect((await resolveTrustBaseOverride({ trustBase: file }, {}))?.source).toEqual({
+      kind: 'file',
+      path: path.resolve(file),
+    });
   });
 });
 
@@ -134,6 +163,24 @@ describe('loadEnvironment', () => {
       process.chdir(previous);
     }
   });
+
+  // `UNICITY_TRUST_BASE` is deliberately not accepted from an implicitly loaded
+  // `./.env`; see the refusal in loadEnvironment. It cannot be covered here:
+  // `process.loadEnvFile` is native and writes to the real `process.env`, while
+  // Jest hands each test file a copy, so nothing a `.env` sets is ever visible in
+  // process. That is also why the test above only asserts it does not throw. The
+  // behaviour is covered end to end in tests/e2e/CliOfflineTest.ts, which runs the
+  // built CLI as a child process.
+
+  it('leaves an inherited UNICITY_TRUST_BASE alone', () => {
+    process.env.UNICITY_TRUST_BASE = '/inherited.json';
+    try {
+      expect(loadEnvironment().refusedTrustBasePath).toBeUndefined();
+      expect(process.env.UNICITY_TRUST_BASE).toEqual('/inherited.json');
+    } finally {
+      delete process.env.UNICITY_TRUST_BASE;
+    }
+  });
 });
 
 describe('resolveStampConfig', () => {
@@ -149,6 +196,57 @@ describe('resolveStampConfig', () => {
     expect(config.out).toEqual(`token_${TEST_DIGEST_HEX.slice(0, 16)}.cbor`);
     expect(config.apiKey).toEqual('sk_test');
     expect(config.allowInsecure).toBe(false);
+  });
+
+  // The token is written only after the stamp has been certified and billed, so a
+  // destination that cannot be written has to be rejected here, while it is free.
+  // The permissions required differ by case: replacing a file truncates it in
+  // place and needs nothing from the directory, whereas creating one does.
+  describe('output destination checks', () => {
+    let directory: string;
+
+    beforeEach(async () => {
+      directory = await tempDir('timestamp-cli-out-');
+    });
+
+    afterEach(async () => {
+      await chmod(directory, 0o700).catch(() => undefined);
+    });
+
+    it('rejects a directory that does not exist', async () => {
+      const out = path.join(directory, 'missing', 'token.cbor');
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { out }, env)).rejects.toThrow(/Cannot write to the output/);
+    });
+
+    it('rejects creating a file in a read-only directory', async () => {
+      await chmod(directory, 0o500);
+      const out = path.join(directory, 'token.cbor');
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env)).rejects.toThrow(
+        /Cannot write to the output/,
+      );
+    });
+
+    it('allows replacing a writable file even in a read-only directory', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o600 });
+      await chmod(directory, 0o500);
+      const config = await resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env);
+      expect(config.out).toEqual(out);
+    });
+
+    it('rejects replacing a file it cannot write to', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o400 });
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env)).rejects.toThrow(
+        /Cannot write to .*token\.cbor/,
+      );
+    });
+
+    it('still refuses an existing file without --force', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o600 });
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { out }, env)).rejects.toThrow(/Refusing to overwrite/);
+    });
   });
 
   it('requires a digest or a file, and an API key', async () => {
