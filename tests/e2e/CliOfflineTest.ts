@@ -38,6 +38,10 @@ describe('unicity-timestamp (offline)', () => {
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--network', 'devnet'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--gateway', 'http://127.0.0.1:9'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--timeout', '0'],
+        ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--timeout', '2147484'],
+        // A mistyped --out directory is the realistic way to reach a write failure
+        // after the stamp has been billed, so it has to be caught here instead.
+        ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--out', '/nonexistent-dir-xyzzy/token.cbor'],
         ['verify', '/nonexistent.cbor'],
         ['stamp', TEST_DIGEST_HEX, '--api-key', 'sk_x', '--dotenv', '/nonexistent.env'],
         ['nonsense'],

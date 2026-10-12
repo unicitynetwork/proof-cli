@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
@@ -196,6 +196,57 @@ describe('resolveStampConfig', () => {
     expect(config.out).toEqual(`token_${TEST_DIGEST_HEX.slice(0, 16)}.cbor`);
     expect(config.apiKey).toEqual('sk_test');
     expect(config.allowInsecure).toBe(false);
+  });
+
+  // The token is written only after the stamp has been certified and billed, so a
+  // destination that cannot be written has to be rejected here, while it is free.
+  // The permissions required differ by case: replacing a file truncates it in
+  // place and needs nothing from the directory, whereas creating one does.
+  describe('output destination checks', () => {
+    let directory: string;
+
+    beforeEach(async () => {
+      directory = await tempDir('timestamp-cli-out-');
+    });
+
+    afterEach(async () => {
+      await chmod(directory, 0o700).catch(() => undefined);
+    });
+
+    it('rejects a directory that does not exist', async () => {
+      const out = path.join(directory, 'missing', 'token.cbor');
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { out }, env)).rejects.toThrow(/Cannot write to the output/);
+    });
+
+    it('rejects creating a file in a read-only directory', async () => {
+      await chmod(directory, 0o500);
+      const out = path.join(directory, 'token.cbor');
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env)).rejects.toThrow(
+        /Cannot write to the output/,
+      );
+    });
+
+    it('allows replacing a writable file even in a read-only directory', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o600 });
+      await chmod(directory, 0o500);
+      const config = await resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env);
+      expect(config.out).toEqual(out);
+    });
+
+    it('rejects replacing a file it cannot write to', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o400 });
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { force: true, out }, env)).rejects.toThrow(
+        /Cannot write to .*token\.cbor/,
+      );
+    });
+
+    it('still refuses an existing file without --force', async () => {
+      const out = path.join(directory, 'token.cbor');
+      await writeFile(out, 'existing', { mode: 0o600 });
+      await expect(resolveStampConfig(TEST_DIGEST_HEX, { out }, env)).rejects.toThrow(/Refusing to overwrite/);
+    });
   });
 
   it('requires a digest or a file, and an API key', async () => {

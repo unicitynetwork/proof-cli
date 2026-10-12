@@ -105,6 +105,11 @@ describe('output', () => {
       });
       expect(verifyJson(ok, bundled).details?.status).toEqual('OK');
 
+      // No trust base could be selected at all, which is how `verify` reports a
+      // token whose network id matches no bundled pin.
+      expect(verifyText(ok, null)).toContain('Trust base     none selected');
+      expect(verifyJson(ok, null).trustBase).toBeNull();
+
       // An override must never be able to present itself as the bundled pin.
       const override = { kind: 'file', path: '/tmp/rogue.json' } as const;
       expect(verifyText(ok, override)).toContain('Trust base     /tmp/rogue.json  (override, not the bundled pin)');

@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { ICommandContext } from '../../src/commands/context.js';
@@ -44,5 +44,32 @@ describe('runKeygen under a umask that masks owner bits', () => {
     await runKeygen({ force: true, out }, context());
     expect((await stat(out)).mode & 0o777).toBe(0o600);
     expect((await readFile(out, 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('runKeygen when the staged write cannot complete', () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await tempDir('timestamp-cli-keygen-fail-');
+  });
+
+  afterEach(async () => {
+    await chmod(directory, 0o700).catch(() => undefined);
+  });
+
+  // The forced path stages the key in a sibling file. If that write or the rename
+  // fails, the cleanup must not mask the error that caused it, and must not leave
+  // a stray key fragment next to the target.
+  it('surfaces the real error and leaves no staged key behind', async () => {
+    const out = path.join(directory, 'target.key');
+    await writeFile(out, 'placeholder\n', { mode: 0o600 });
+    await chmod(directory, 0o500);
+
+    await expect(runKeygen({ force: true, out }, context())).rejects.toThrow(/EACCES|EPERM/);
+
+    await chmod(directory, 0o700);
+    expect(await readdir(directory)).toEqual(['target.key']);
+    expect(await readFile(out, 'utf8')).toEqual('placeholder\n');
   });
 });

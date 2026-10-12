@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { constants, createReadStream } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -286,17 +286,59 @@ async function resolveSigner(flags: IStampFlags, env: NodeJS.ProcessEnv): Promis
   return new SigningService(parsePrivateKey(keyHex));
 }
 
-/** Fail before any network contact when the output file already exists. The write itself uses `wx` as well. */
+/**
+ * Fail before any network contact when the token cannot be written afterwards.
+ *
+ * The write happens once the stamp has been certified and billed, so the point of
+ * these checks is to catch the reachable mistakes while they are still free. A
+ * mistyped or read-only `--out` directory is the realistic one; an existing output
+ * file is the other. Both are checked here, the directory even under `--force`,
+ * which still needs somewhere to write.
+ *
+ * This cannot be airtight — the directory may stop being writable between here and
+ * the write, and nothing catches a full disk — which is why `writeCertifiedToken`
+ * still prints the token on failure. Prevention for what is foreseeable, recovery
+ * for what is not.
+ *
+ * @param {string} out Output path, or `-` for stdout.
+ * @param {boolean} force Whether an existing file may be replaced.
+ * @throws {CliError} If the directory cannot be written to, or the file exists without `--force`.
+ */
 async function assertWritable(out: string, force: boolean): Promise<void> {
-  if (out === '-' || force) {
+  if (out === '-') {
     return;
   }
+
+  const exists = await access(out).then(
+    () => true,
+    () => false,
+  );
+  if (exists) {
+    if (!force) {
+      throw usageError(`Refusing to overwrite ${out}; pass --force or another --out.`);
+    }
+    // Replacing an existing file truncates it in place, which needs write
+    // permission on the file and nothing from the directory — so a read-only
+    // directory is no obstacle here, and must not be treated as one.
+    try {
+      await access(out, constants.W_OK);
+    } catch (error) {
+      throw usageError(`Cannot write to ${out}.`, { cause: error });
+    }
+    return;
+  }
+
+  // Creating a new entry is the case that needs the directory itself. Symlinks are
+  // not resolved here, so a dangling link in a read-only directory pointing into a
+  // writable one is refused even though the write would have worked. That is
+  // accepted deliberately: the check errs towards refusing before anything is
+  // billed, which costs a retry, where erring the other way costs a stamp.
+  const directory = path.dirname(path.resolve(out));
   try {
-    await access(out);
-  } catch {
-    return;
+    await access(directory, constants.W_OK | constants.X_OK);
+  } catch (error) {
+    throw usageError(`Cannot write to the output directory ${directory}.`, { cause: error });
   }
-  throw usageError(`Refusing to overwrite ${out}; pass --force or another --out.`);
 }
 
 /**
