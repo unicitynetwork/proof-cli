@@ -36,13 +36,24 @@ export async function runVerify(file: string, flags: IVerifyFlags, context: ICom
   }
   const token = decoded.token;
 
+  // Whether a digest was asked for, which this path has to carry itself: it
+  // returns before `verify` is ever called, and reporting it as "no digest given"
+  // would advise the reader to pass the option they just passed.
+  const digestRequested = flags.hash !== undefined || flags.file !== undefined;
+
   let choice = await resolveTrustBaseOverride(flags);
   if (choice === undefined) {
     const name = networkNameForId(token.networkId.id);
     if (name === undefined) {
       return report(
         context,
-        verificationFailure(describeToken(token), `unknown network id ${token.networkId.id}; pass --trust-base`),
+        verificationFailure(
+          describeToken(token),
+          `unknown network id ${token.networkId.id}; pass --trust-base`,
+          null,
+          null,
+          digestRequested,
+        ),
         null,
       );
     }

@@ -80,6 +80,23 @@ describeNetwork(`unicity-timestamp against ${TEST_NETWORK}`, () => {
   );
 
   it(
+    'puts the JSON object on stdout even when the token would go there',
+    async () => {
+      // `--out -` normally writes raw token bytes to stdout and pushes the summary
+      // to stderr. Under --json that left the documented object on the wrong
+      // stream, so `stamp --out - --json | jq` read CBOR. The envelope already
+      // carries the token as hex, so stdout holds exactly one JSON object.
+      const result = await runCli(['stamp', otherDigest, '--out', '-', '--json'], { cwd, env });
+      expect(result.code).toBe(0);
+      const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(parsed).toMatchObject({ command: 'stamp', out: null });
+      expect(parsed.token).toMatch(/^[0-9a-f]+$/);
+      expect(parsed).toMatchObject({ hash: { algorithm: 'SHA-256', digest: otherDigest } });
+    },
+    TIMEOUT,
+  );
+
+  it(
     'stamps with a generated key and reports the signer',
     async () => {
       const keyFile = path.join(cwd, 'signer.key');

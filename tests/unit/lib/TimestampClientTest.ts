@@ -13,8 +13,9 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
+import { StampError } from '../../../src/lib/errors.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
-import { describeToken, StampError, stampWith, verificationFailure, verify } from '../../../src/lib/TimestampClient.js';
+import { describeToken, stampWith, verificationFailure, verify } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST, TEST_DIGEST_HEX } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 
@@ -82,14 +83,25 @@ describe('TimestampClient', () => {
     expect(result.details?.status).toEqual(VerificationStatus.OK);
   });
 
-  it('explains a trust base from the wrong network', async () => {
+  it('explains a trust base from the wrong network, naming the rule that failed', async () => {
     const token = await stampWith(client, trustBase, TEST_DIGEST, fast);
     const result = await verify(token, bundledTrustBase('mainnet'));
     expect(result.status).toEqual('FAIL');
-    expect(result.reason).toEqual(
-      'Token is for network 3 but the trust base is for network 1; select the matching network or trust base.',
+    // The rule that actually failed leads, so the verdict cannot be attributed to
+    // a trust-base mismatch that happens to be true but did not cause anything.
+    // The actionable part still follows it.
+    expect(result.reason).toContain('MintNetworkMatchesTrustBaseRule');
+    expect(result.reason).toContain(
+      'The token is for network 3 and the trust base for network 1; select the matching network or trust base.',
     );
+    // Epochs of different networks are unrelated, so that comparison stays out of it.
+    expect(result.reason).not.toContain('epoch');
   });
+
+  // A tampered token that still fails against the *right* trust base is covered
+  // end to end in tests/e2e/CliOfflineTest.ts, against the committed fixture: a
+  // locally minted token is too small for a byte flip to land in the proof
+  // reliably, and an offset that happens to work here would be a trap.
 
   it('builds a failed result around a description', async () => {
     const token = await stampWith(client, trustBase, TEST_DIGEST, fast);

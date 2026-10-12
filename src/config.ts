@@ -278,6 +278,13 @@ async function resolveSigner(flags: IStampFlags, env: NodeJS.ProcessEnv): Promis
     keyHex = env.UNICITY_PRIVATE_KEY;
   }
   if (keyHex === undefined || keyHex.trim() === '') {
+    // Passing --key-file is a request to sign. Falling through to an anonymous
+    // stamp would answer it with a timestamp that proves nothing about the
+    // signer, which is exactly what a truncated or half-copied key file looks
+    // like. Only the environment variable may be empty and mean "no key".
+    if (flags.keyFile !== undefined) {
+      throw usageError(`Key file ${flags.keyFile} is empty; expected 64 hex characters.`);
+    }
     if (flags.sign) {
       throw usageError('--sign requires a key: pass --key-file or set UNICITY_PRIVATE_KEY.');
     }

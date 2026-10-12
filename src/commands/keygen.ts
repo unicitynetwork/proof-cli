@@ -79,7 +79,15 @@ export async function runKeygen(flags: IKeygenFlags, context: ICommandContext): 
   const hex = HexConverter.encode(privateKey);
 
   if (flags.out === '-') {
-    context.stdout.write(`${hex}\n`);
+    // `--json` is promised on every command, so this path cannot keep printing a
+    // bare line. The private key is included here, and only here: writing it into
+    // the JSON of a file-bound keygen would copy the secret out of the 0600 file
+    // and into whatever consumes the output.
+    context.stdout.write(
+      context.json
+        ? toJsonLine(keygenJson('-', HexConverter.encode(new SigningService(privateKey).publicKey), hex))
+        : `${hex}\n`,
+    );
     return EXIT_OK;
   }
 

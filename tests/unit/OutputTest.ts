@@ -24,6 +24,30 @@ import {
 import { TEST_DIGEST, TEST_DIGEST_HEX } from '../support/fixtures.js';
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
 
+// `referenceTime` is an unbounded CBOR integer, so a hostile token can carry a
+// value no Date can hold. `toISOString` throws on those, which turned `inspect`
+// — whose contract is to print fields without checking them — into a crash, and
+// made `verify` report a bad token as a usage error.
+describe('formatIso', () => {
+  it('formats ordinary times', () => {
+    expect(formatIso(1791549048n)).toEqual('2026-10-09T12:30:48Z');
+    expect(formatIso(0n)).toEqual('1970-01-01T00:00:00Z');
+  });
+
+  it('reports an unrepresentable time instead of throwing', () => {
+    for (const seconds of [10n ** 19n, -(10n ** 19n), 10n ** 30n]) {
+      expect(() => formatIso(seconds)).not.toThrow();
+      expect(formatIso(seconds)).toContain('out of range');
+    }
+  });
+
+  it('accepts the edges of the representable range', () => {
+    const maximum = 8_640_000_000_000n; // 8.64e15 ms, as seconds
+    expect(formatIso(maximum)).not.toContain('out of range');
+    expect(formatIso(maximum + 1n)).toContain('out of range');
+  });
+});
+
 describe('output', () => {
   it('formats Unix seconds as ISO 8601 without milliseconds', () => {
     expect(formatIso(1791200527n)).toEqual('2026-10-05T11:42:07Z');

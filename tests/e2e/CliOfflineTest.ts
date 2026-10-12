@@ -149,6 +149,23 @@ describe('unicity-timestamp (offline)', () => {
       expect(piped.code).toBe(0);
       expect(piped.stdout.trim()).toMatch(/^[0-9a-f]{64}$/);
       expect(piped.stderr).toEqual('');
+
+      // The README promises one JSON object on stdout from every command, and
+      // this path used to return early and print a bare hex line instead. The
+      // private key belongs in it here, because stdout is where it was asked to
+      // go; the file-bound case above must not carry it.
+      for (const args of [
+        ['keygen', '--out', '-', '--json'],
+        ['--json', 'keygen', '--out', '-'],
+      ]) {
+        const pipedJson = await runCli(args, { cwd });
+        expect({ args, code: pipedJson.code }).toEqual({ args, code: 0 });
+        const parsed = JSON.parse(pipedJson.stdout) as Record<string, unknown>;
+        expect(parsed).toMatchObject({ command: 'keygen', out: '-' });
+        expect(parsed.publicKey).toMatch(/^[0-9a-f]{66}$/);
+        expect(parsed.privateKey).toMatch(/^[0-9a-f]{64}$/);
+      }
+      expect(JSON.parse(forced.stdout) as Record<string, unknown>).not.toHaveProperty('privateKey');
     },
     TIMEOUT,
   );
@@ -227,14 +244,41 @@ describe('unicity-timestamp (offline)', () => {
       bytes[bytes.length - 1] ^= 0x01;
       await writeFile(tampered, bytes);
 
-      const [anonymousResult, signedResult, mismatch, wrongNetwork, tamperedResult, inspected] = await Promise.all([
-        runCli(['verify', anonymous, '--json'], { cwd }),
-        runCli(['verify', path.join(fixtures, 'testnet2-signed.cbor'), '--json'], { cwd }),
-        runCli(['verify', anonymous, '--hash', TEST_DIGEST_HEX], { cwd }),
-        runCli(['verify', anonymous, '--network', 'mainnet'], { cwd }),
-        runCli(['verify', tampered], { cwd }),
-        runCli(['inspect', anonymous, '--json'], { cwd }),
-      ]);
+      // Flipping the last byte truncates the CBOR, so the decoder rejects it
+      // before any verification runs. That exercises the decode path and tells
+      // us nothing about the cryptography, so a byte that reaches the proof is
+      // tampered with separately below.
+      const forged = path.join(cwd, 'forged.cbor');
+      const forgedBytes = new Uint8Array(await readFile(anonymous));
+      forgedBytes[700] ^= 0x01;
+      await writeFile(forged, forgedBytes);
+
+      const [anonymousResult, signedResult, mismatch, wrongNetwork, tamperedResult, forgedResult, inspected] =
+        await Promise.all([
+          runCli(['verify', anonymous, '--json'], { cwd }),
+          runCli(['verify', path.join(fixtures, 'testnet2-signed.cbor'), '--json'], { cwd }),
+          runCli(['verify', anonymous, '--hash', TEST_DIGEST_HEX], { cwd }),
+          runCli(['verify', anonymous, '--network', 'mainnet'], { cwd }),
+          runCli(['verify', tampered], { cwd }),
+          runCli(['verify', forged, '--hash', TEST_DIGEST_HEX, '--json'], { cwd }),
+          runCli(['inspect', anonymous, '--json'], { cwd }),
+        ]);
+
+      // The real assertion: a byte inside the proof is rejected by the
+      // cryptography, naming the rule and its status, not by the CBOR decoder.
+      // Gutting the trust-base or quorum checks has to fail this.
+      expect(forgedResult.code).toBe(1);
+      const forgedJson = JSON.parse(forgedResult.stdout) as { reason: string; status: string };
+      expect(forgedJson.status).toEqual('FAIL');
+      expect(forgedJson.reason).toContain('InclusionProofVerificationRule');
+      expect(forgedJson.reason).not.toContain('not a token');
+
+      // A digest was supplied but never compared, which must not be reported as
+      // "you did not supply one".
+      expect(JSON.parse(forgedResult.stdout)).toMatchObject({
+        expectedHashMatches: null,
+        expectedHashRequested: true,
+      });
 
       for (const [result, signed] of [
         [anonymousResult, false],
@@ -249,7 +293,9 @@ describe('unicity-timestamp (offline)', () => {
       expect(mismatch.code).toBe(1);
       expect(mismatch.stdout).toContain('Hash mismatch');
       expect(wrongNetwork.code).toBe(1);
-      expect(wrongNetwork.stdout).toContain('network 4 but the trust base is for network 1');
+      expect(wrongNetwork.stdout).toContain(
+        'The token is for network 4 and the trust base for network 1; select the matching network or trust base.',
+      );
       expect(tamperedResult.code).toBe(1);
       expect(inspected.code).toBe(0);
       expect(JSON.parse(inspected.stdout)).toMatchObject({ command: 'inspect', network: { id: 4 }, verified: false });

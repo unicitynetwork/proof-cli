@@ -53,6 +53,8 @@ export interface IVerifyJson extends IDescriptionJson {
   readonly command: 'verify';
   readonly details: IResultJson | null;
   readonly expectedHashMatches: boolean | null;
+  /** Whether a digest was supplied; separates "not asked for" from "not reached". */
+  readonly expectedHashRequested: boolean;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
   readonly trustBase: ITrustBaseJson | null;
@@ -72,10 +74,14 @@ export interface INotATokenJson {
 export interface IKeygenJson {
   readonly command: 'keygen';
   readonly out: string;
+  /** Present only when the key went to stdout; otherwise it is in the file at `out`. */
+  readonly privateKey?: string;
   readonly publicKey: string;
 }
 
 const LABEL_WIDTH = 15;
+/** The largest absolute time a JavaScript Date can represent, in milliseconds. */
+const MAX_DATE_MILLISECONDS = 8.64e15;
 
 /**
  * @param {string} label Left column.
@@ -91,7 +97,15 @@ export function line(label: string, value: string): string {
  * @returns {string} ISO 8601 UTC without milliseconds.
  */
 export function formatIso(seconds: bigint): string {
-  return new Date(Number(seconds) * 1000).toISOString().replace('.000Z', 'Z');
+  // `referenceTime` is an unbounded CBOR integer, so a hostile token can carry a
+  // value no Date can hold. `toISOString` throws on those, which would turn
+  // `inspect` — whose whole contract is to print fields without judging them —
+  // into a crash, and would misreport a bad token as a usage error.
+  const milliseconds = Number(seconds) * 1000;
+  if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > MAX_DATE_MILLISECONDS) {
+    return `out of range (${seconds})`;
+  }
+  return new Date(milliseconds).toISOString().replace('.000Z', 'Z');
 }
 
 /**
@@ -227,10 +241,14 @@ export function verifyText(result: ITimestampVerificationResult, source: TrustBa
     line('Trust base', trustBaseLabel(source)),
     line('Hash', hashLabel(result)),
   ];
-  if (result.expectedDigestMatches === null) {
-    lines.push(line('Expected hash', 'not checked; pass --file or --hash to confirm the token is for your document'));
-  } else {
+  if (result.expectedDigestMatches !== null) {
     lines.push(line('Expected hash', result.expectedDigestMatches ? 'matches' : 'differs'));
+  } else if (result.expectedDigestRequested) {
+    // Advising the reader to pass --hash when they already did would be telling
+    // them to repeat what they just did; the comparison was never reached.
+    lines.push(line('Expected hash', 'not checked; verification failed before the digest was compared'));
+  } else {
+    lines.push(line('Expected hash', 'not checked; pass --file or --hash to confirm the token is for your document'));
   }
   lines.push(line('Signer', signerLabel(result)), ...timeLines(result));
   if (result.status !== 'OK' && result.details !== null) {
@@ -268,8 +286,10 @@ export function keygenText(out: string, publicKey: string): string {
   return [line('Key written', `${out} (mode 0600)`), line('Public key', publicKey)].join('\n');
 }
 
-export function keygenJson(out: string, publicKey: string): IKeygenJson {
-  return { command: 'keygen', out, publicKey };
+export function keygenJson(out: string, publicKey: string, privateKey?: string): IKeygenJson {
+  return privateKey === undefined
+    ? { command: 'keygen', out, publicKey }
+    : { command: 'keygen', out, privateKey, publicKey };
 }
 
 /**
@@ -332,6 +352,7 @@ export function verifyJson(result: ITimestampVerificationResult, source: TrustBa
   return {
     command: 'verify',
     expectedHashMatches: result.expectedDigestMatches,
+    expectedHashRequested: result.expectedDigestRequested,
     reason: result.reason,
     status: result.status,
     ...descriptionJson(result),

@@ -20,9 +20,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # `npm ci` runs `prepare`, and `npm test` runs `pretest`; both build. A third
+      # explicit build here compiled the same sources again for nothing.
       - run: npm ci
-
-      - run: npm run build
 
       - run: npm run build:check
 
