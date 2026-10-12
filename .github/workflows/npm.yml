@@ -5,12 +5,17 @@ name: Release
 # pushed by this workflow, so package.json, the git tag and the registry cannot
 # drift apart the way they do when a human edits one of the three.
 #
-# Prerequisite, once: the package has to exist on the registry and name this
-# workflow as its trusted publisher (npmjs.com > the package > Settings >
-# Trusted Publisher; repository `unicitynetwork/timestamp-cli`, workflow
-# `npm.yml`). npm will not accept a trusted publisher for a package that has
-# never been published, so the first release is published by hand and every
-# release after it runs from here.
+# Prerequisites, once:
+#
+#   * The `npm-publish` environment exists with `main` as its only allowed
+#     deployment branch. See the note on the job below for why this is the real
+#     restriction rather than anything written in this file.
+#   * The package exists on the registry and names this workflow as its trusted
+#     publisher (npmjs.com > the package > Settings > Trusted Publisher;
+#     repository `unicitynetwork/timestamp-cli`, workflow `npm.yml`, environment
+#     `npm-publish`). npm will not accept a trusted publisher for a package that
+#     has never been published, so the first release is published by hand and
+#     every release after it runs from here.
 on:
   workflow_dispatch:
     inputs:
@@ -40,6 +45,18 @@ jobs:
   release:
     name: Build, publish and tag
     runs-on: ubuntu-latest
+    # This is what actually restricts releases to `main`, and it has to live
+    # outside the workflow file to mean anything: a dispatch may name any ref, and
+    # GitHub runs the workflow definition *from that ref*, so any check written
+    # here is editable by whoever pushed the branch being released. The
+    # `npm-publish` environment allows only `main` as a deployment branch, which
+    # GitHub enforces before the job starts, and npm can pin the trusted publisher
+    # to the same environment so a token minted anywhere else is refused.
+    #
+    # The environment must exist with that branch policy before this workflow is
+    # used. GitHub silently creates an unprotected environment on first reference,
+    # which would look like a control while being none.
+    environment: npm-publish
     permissions:
       # The bump commit and the tag are pushed from here.
       contents: write
@@ -47,10 +64,10 @@ jobs:
       # credential, so no npm token is stored in the repository.
       id-token: write
     steps:
-      # A release has to land somewhere. Dispatching against a tag is accepted by
-      # the API, gives a detached HEAD, and would end with a push trying to move
-      # the tag it was dispatched from — rejected, after the publish had already
-      # gone through. Refused here, before anything is spent.
+      # Not a security control — the environment above is. This only turns one
+      # specific mistake into a clear message: dispatching against a tag is
+      # accepted by the API, gives a detached HEAD, and would end with a push
+      # trying to move the tag it came from, after the publish had gone through.
       - name: Require a branch
         if: github.ref_type != 'branch'
         env:
