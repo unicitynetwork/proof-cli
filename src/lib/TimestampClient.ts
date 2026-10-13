@@ -69,15 +69,8 @@ export interface ITimestampDescription {
 export interface ITimestampVerificationResult extends ITimestampDescription {
   /** SDK result tree, or null when verification was not reached. */
   readonly details: VerificationResult<VerificationStatus> | null;
-  /**
-   * Null when the comparison did not happen. On its own that is ambiguous, which
-   * is what {@link expectedDigestRequested} resolves: without it, a caller cannot
-   * tell "you asked for no digest" from "your digest was never reached because
-   * verification failed first", and the second must not be reported as the first.
-   */
+  /** Null when no expected digest was given or the comparison was not reached. */
   readonly expectedDigestMatches: boolean | null;
-  /** Whether a digest was supplied to compare against. */
-  readonly expectedDigestRequested: boolean;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
 }
@@ -224,9 +217,8 @@ export function verificationFailure(
   reason: string,
   details: VerificationResult<VerificationStatus> | null = null,
   expectedDigestMatches: boolean | null = null,
-  expectedDigestRequested = false,
 ): ITimestampVerificationResult {
-  return { ...description, details, expectedDigestMatches, expectedDigestRequested, reason, status: 'FAIL' };
+  return { ...description, details, expectedDigestMatches, reason, status: 'FAIL' };
 }
 
 /**
@@ -243,79 +235,45 @@ export async function verify(
   options: ITimestampVerifyOptions = {},
 ): Promise<ITimestampVerificationResult> {
   const description = describeToken(token);
-  const requested = options.expectedDigest !== undefined;
   if (description.transferCount > 0) {
     return verificationFailure(
       description,
       `Timestamp tokens carry no transfers; this one has ${description.transferCount}.`,
-      null,
-      null,
-      requested,
     );
   }
   if (!description.tokenTypeIsTimestamp) {
     return verificationFailure(
       description,
       `Not a timestamp token: token type ${HexConverter.encode(token.type.bytes)}.`,
-      null,
-      null,
-      requested,
     );
   }
 
   const details = await token.verify(createVerificationContext(trustBase));
   if (details.status !== VerificationStatus.OK) {
-    return verificationFailure(description, explainFailure(details, description, trustBase), details, null, requested);
+    return verificationFailure(description, explainFailure(details, description, trustBase), details);
   }
-
-  // Fails closed. A digest was supplied to be checked, so a payload that cannot
-  // be read means the check did not happen — which is a reason to reject the
-  // token, not to report success with the comparison quietly skipped. Reachable
-  // only if `describeToken` and the issuance verifier ever disagree about the
-  // payload, which is exactly the case that must not pass silently.
-  if (requested && description.payload === null) {
+  if (options.expectedDigest === undefined) {
+    return { ...description, details, expectedDigestMatches: null, reason: null, status: 'OK' };
+  }
+  // Not dead code, and not a pass: reachable only if `describeToken` and the
+  // issuance verifier disagree about the payload, which is exactly the case that
+  // must not report OK with the caller's comparison quietly skipped.
+  if (description.payload === null) {
     return verificationFailure(
       description,
       `Cannot check the expected hash: the payload could not be read (${description.payloadError ?? 'no payload'}).`,
       details,
-      null,
-      requested,
     );
   }
-
-  const expectedDigestMatches =
-    !requested || description.payload === null
-      ? null
-      : areUint8ArraysEqual(description.payload.digest, options.expectedDigest);
-  if (expectedDigestMatches === false) {
-    return verificationFailure(
-      description,
-      'Hash mismatch: the token certifies a different digest.',
-      details,
-      false,
-      requested,
-    );
+  if (!areUint8ArraysEqual(description.payload.digest, options.expectedDigest)) {
+    return verificationFailure(description, 'Hash mismatch: the token certifies a different digest.', details, false);
   }
-
-  return {
-    ...description,
-    details,
-    expectedDigestMatches,
-    expectedDigestRequested: requested,
-    reason: null,
-    status: 'OK',
-  };
+  return { ...description, details, expectedDigestMatches: true, reason: null, status: 'OK' };
 }
 
 /**
- * Pick the message a user needs out of a failed verification.
- *
- * The rule that actually failed decides the message. The trust-base comparisons
- * only add context to it, and deliberately so: they are diagnostic, not causal —
- * a token verifies perfectly well against a trust base carrying a different
- * epoch — so reporting one as the reason would blame the trust base for a
- * tampered token, and send the reader off to fetch a different root of trust,
- * which is the one change that can turn a forgery into a pass.
+ * Pick the message a user needs out of a failed verification: the deepest failing
+ * rule that carries one, followed by the trust-base network when it is not the token's.
  */
 function explainFailure(
   details: VerificationResult<VerificationStatus>,
@@ -323,25 +281,10 @@ function explainFailure(
   trustBase: RootTrustBase,
 ): string {
   const failures = collectFailures(details);
-  const leaf = failures.find((result) => result.results.length === 0) ?? failures.at(-1) ?? details;
-
-  // The SDK leaves `message` empty on some rules and puts the diagnosis in
-  // `status`, so falling back to the rule name alone loses the only detail that
-  // distinguishes a wrong trust base from a hash mismatch from a bad Merkle path.
-  const reason = leaf.message !== '' ? leaf.message : `Verification rule ${leaf.rule} failed: ${String(leaf.status)}.`;
-
-  // Appended to the rule's own verdict, never in place of it. A network mismatch
-  // comes with the fix, because it is actionable and a rule will have named it.
-  // An epoch mismatch gets no such advice: it is not enforced anywhere, so a
-  // token can verify against a trust base with a different epoch, and telling a
-  // reader to go and find another trust base is advice that ends in weaker
-  // verification. Epochs are only compared once the networks agree, since
-  // epochs of different networks are unrelated numbers.
+  const explained = failures.filter((result) => result.message !== '').at(-1) ?? failures.at(-1) ?? details;
+  const reason = explained.message !== '' ? explained.message : `Verification rule ${explained.rule} failed.`;
   if (description.networkId.id !== trustBase.networkId.id) {
     return `${reason} The token is for network ${description.networkId.id} and the trust base for network ${trustBase.networkId.id}; select the matching network or trust base.`;
-  }
-  if (description.epoch !== trustBase.epoch) {
-    return `${reason} The token was sealed in epoch ${description.epoch} and the trust base is for epoch ${trustBase.epoch}.`;
   }
   return reason;
 }

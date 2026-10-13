@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -16,11 +16,6 @@ export const TEST_PRIVATE_KEY_HEX = '01'.repeat(32);
 export const TEST_PRIVATE_KEY = HexConverter.decode(TEST_PRIVATE_KEY_HEX);
 export const TEST_PUBLIC_KEY_HEX = '031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f';
 
-/**
- * Every directory handed out by {@link tempDir} in this worker, so the suite can
- * clean up after itself. Jest runs each test file in its own worker, so this
- * stays per-file and needs no coordination.
- */
 const handedOut: string[] = [];
 
 /** Fresh temporary directory under the OS temp root, removed when the file finishes. */
@@ -30,16 +25,6 @@ export async function tempDir(prefix = 'timestamp-cli-'): Promise<string> {
   return directory;
 }
 
-/**
- * Remove the directories this file created. Best effort: a leftover temp
- * directory is untidy, but failing a green suite over one would be worse, and
- * some tests deliberately leave a directory unreadable.
- */
 export async function removeTempDirs(): Promise<void> {
-  await Promise.all(
-    handedOut.splice(0).map(async (directory) => {
-      await chmod(directory, 0o700).catch(() => undefined);
-      await rm(directory, { force: true, recursive: true }).catch(() => undefined);
-    }),
-  );
+  await Promise.all(handedOut.splice(0).map((directory) => rm(directory, { force: true, recursive: true })));
 }

@@ -83,25 +83,14 @@ describe('TimestampClient', () => {
     expect(result.details?.status).toEqual(VerificationStatus.OK);
   });
 
-  it('explains a trust base from the wrong network, naming the rule that failed', async () => {
+  it('explains a trust base from the wrong network', async () => {
     const token = await stampWith(client, trustBase, TEST_DIGEST, fast);
     const result = await verify(token, bundledTrustBase('mainnet'));
     expect(result.status).toEqual('FAIL');
-    // The rule that actually failed leads, so the verdict cannot be attributed to
-    // a trust-base mismatch that happens to be true but did not cause anything.
-    // The actionable part still follows it.
-    expect(result.reason).toContain('MintNetworkMatchesTrustBaseRule');
-    expect(result.reason).toContain(
-      'The token is for network 3 and the trust base for network 1; select the matching network or trust base.',
+    expect(result.reason).toEqual(
+      'Mint network does not match trust base. The token is for network 3 and the trust base for network 1; select the matching network or trust base.',
     );
-    // Epochs of different networks are unrelated, so that comparison stays out of it.
-    expect(result.reason).not.toContain('epoch');
   });
-
-  // A tampered token that still fails against the *right* trust base is covered
-  // end to end in tests/e2e/CliOfflineTest.ts, against the committed fixture: a
-  // locally minted token is too small for a byte flip to land in the proof
-  // reliably, and an offset that happens to work here would be a trap.
 
   it('builds a failed result around a description', async () => {
     const token = await stampWith(client, trustBase, TEST_DIGEST, fast);

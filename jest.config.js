@@ -9,10 +9,7 @@ try {
 }
 
 export default {
-  // `Boolean(process.env.CI)` is true for CI=false, CI=0 and CI="" alike, because
-  // every one of those is a non-empty string or an explicit opt-out that reads as
-  // truthy. Compare the value instead of its presence.
-  collectCoverage: !['', '0', 'false'].includes((process.env.CI ?? '').toLowerCase()),
+  collectCoverage: process.env.CI === 'true',
   collectCoverageFrom: ['<rootDir>/src/**/*.ts'],
   extensionsToTreatAsEsm: ['.ts'],
   setupFilesAfterEnv: ['<rootDir>/tests/support/cleanup.ts'],

@@ -71,11 +71,6 @@ export async function runStamp(
 
   const bytes = token.toCBOR();
   const out = config.out === '-' ? null : path.resolve(config.out);
-  // `--out -` normally puts raw token bytes on stdout, which is why the human
-  // summary is pushed to stderr: the two cannot share the stream. Under --json
-  // there is no such conflict — the JSON envelope already carries the token as
-  // hex — so the object goes to stdout where every command promises to put it,
-  // and the raw bytes are not written a second time.
   const tokenToStdout = out === null && !context.json;
   if (tokenToStdout) {
     context.stdout.write(bytes);

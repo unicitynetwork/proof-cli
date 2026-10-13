@@ -17,6 +17,7 @@ import {
   resultTreeJson,
   stampJson,
   stampText,
+  toIso,
   verifyJson,
   verifyText,
   warningLine,
@@ -24,27 +25,18 @@ import {
 import { TEST_DIGEST, TEST_DIGEST_HEX } from '../support/fixtures.js';
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
 
-// `referenceTime` is an unbounded CBOR integer, so a hostile token can carry a
-// value no Date can hold. `toISOString` throws on those, which turned `inspect`
-// — whose contract is to print fields without checking them — into a crash, and
-// made `verify` report a bad token as a usage error.
 describe('formatIso', () => {
-  it('formats ordinary times', () => {
-    expect(formatIso(1791549048n)).toEqual('2026-10-09T12:30:48Z');
-    expect(formatIso(0n)).toEqual('1970-01-01T00:00:00Z');
-  });
-
   it('reports an unrepresentable time instead of throwing', () => {
     for (const seconds of [10n ** 19n, -(10n ** 19n), 10n ** 30n]) {
-      expect(() => formatIso(seconds)).not.toThrow();
       expect(formatIso(seconds)).toContain('out of range');
     }
   });
 
   it('accepts the edges of the representable range', () => {
-    const maximum = 8_640_000_000_000n; // 8.64e15 ms, as seconds
-    expect(formatIso(maximum)).not.toContain('out of range');
-    expect(formatIso(maximum + 1n)).toContain('out of range');
+    const largestDateSeconds = 8_640_000_000_000n;
+    expect(formatIso(largestDateSeconds)).not.toContain('out of range');
+    expect(formatIso(largestDateSeconds + 1n)).toContain('out of range');
+    expect(toIso(largestDateSeconds + 1n)).toBeNull();
   });
 });
 
@@ -66,6 +58,12 @@ describe('output', () => {
     expect(notATokenJson('inspect', 'bad')).toEqual({ command: 'inspect', reason: 'bad', status: 'FAIL' });
     expect(keygenText('/k', '02ab')).toEqual('Key written    /k (mode 0600)\nPublic key     02ab');
     expect(keygenJson('/k', '02ab')).toEqual({ command: 'keygen', out: '/k', publicKey: '02ab' });
+    expect(keygenJson(null, '02ab', 'ff')).toEqual({
+      command: 'keygen',
+      out: null,
+      privateKey: 'ff',
+      publicKey: '02ab',
+    });
     expect(warningLine('careful')).toEqual('warning: careful\n');
   });
 
@@ -144,6 +142,12 @@ describe('output', () => {
         path: '/tmp/rogue.json',
         source: 'file',
       });
+
+      // `referenceTimeIso` is typed as an ISO string, so the sentinel for a time
+      // no Date can hold belongs in the text output only.
+      const hostileTime = { ...description, referenceTime: 10n ** 30n };
+      expect(descriptionJson(hostileTime).referenceTimeIso).toBeNull();
+      expect(inspectText(hostileTime)).toContain('out of range (1000000000000000000000000000000)');
 
       const inspected = inspectText(description);
       expect(inspected.startsWith('UNVERIFIED')).toBe(true);

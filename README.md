@@ -41,7 +41,7 @@ Arguments are loaded, in order of precedence, from: flags > variables in shell m
 | `UNICITY_GATEWAY_URL` | `--gateway` | Override the gateway URL only. | preset gateway |
 | `UNICITY_TRUST_BASE` | `--trust-base` | Override the bundled trust base file. **Not** read from an automatically discovered `./.env` — see below. | bundled file |
 | `UNICITY_TIMEOUT` | `--timeout` | Seconds to wait for the inclusion proof. At most `2147483`, the longest delay a Node timer can hold. | `60` |
-| | `--out` | Where `stamp` writes the token. `-` writes it to stdout. | `token_<first 16 hex of digest>.cbor` in the current directory |
+| | `--out` | Where `stamp` writes the token. `-` writes it to stdout, or, with `--json`, puts the JSON object there instead. | `token_<first 16 hex of digest>.cbor` in the current directory |
 | | `--dotenv` | Load this env file instead of `./.env`. | `./.env` if present |
 
 A `.env.example` is in the repository.
@@ -79,7 +79,7 @@ Token id       321276fcfb19a925b6e5050d5d5de15c82c56dfe7650cc8d0ae6cf7fc336470d
 Written        ./token_2cf24dba5fb0a30e.cbor
 ```
 
-The hash is 64 hex characters, upper or lower case, with or without a `0x` prefix. `--out -` writes the raw token bytes to stdout. Existing files are not overwritten unless you pass `--force`.
+The hash is 64 hex characters, upper or lower case, with or without a `0x` prefix. `--out -` writes the raw token bytes to stdout, and the summary to stderr, so the two can be separated. With `--out - --json` the JSON object goes to stdout instead and the raw bytes are not written: the object already carries the token as hex in `token`. Existing files are not overwritten unless you pass `--force`.
 
 The destination is checked before the request goes out, so a mistyped or
 unwritable `--out` fails with exit code 2 while nothing has been spent.
@@ -99,6 +99,11 @@ By default a stamp proves only that the hash existed. To also prove that *you* s
 unicity-timestamp keygen --out my.key                 # once; mode 0600, 64 hex characters
 unicity-timestamp stamp --file document.pdf --key-file my.key
 ```
+
+`keygen --out -` prints the private key to stdout instead of writing a file, as
+a bare hex line or, with `--json`, as the object's `privateKey`. That field is
+present on this path only: a key written to a file stays in the file, and the
+JSON reports its path and public key alone.
 
 Or put `UNICITY_PRIVATE_KEY=<64 hex>` in `.env` and every stamp is signed. Two flags control this explicitly:
 
@@ -142,7 +147,7 @@ Prints the same fields as `verify` without checking anything, under an `UNVERIFI
 
 ### Scripting
 
-Every command accepts `--json` and prints one JSON object on stdout; everything else goes to stderr. Large integers are decimal strings.
+Every command accepts `--json` and prints one JSON object on stdout; everything else goes to stderr. Large integers are decimal strings. `referenceTimeIso` is null when the token carries a reference time no date can represent; `referenceTime` always holds the raw value.
 
 ```bash
 unicity-timestamp verify document.cbor --file document.pdf --json | jq -r .referenceTimeIso

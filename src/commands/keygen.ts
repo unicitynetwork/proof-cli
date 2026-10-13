@@ -77,17 +77,13 @@ async function writeKeyFile(file: string, contents: string): Promise<void> {
 export async function runKeygen(flags: IKeygenFlags, context: ICommandContext): Promise<number> {
   const privateKey = SigningService.generatePrivateKey();
   const hex = HexConverter.encode(privateKey);
+  const publicKey = HexConverter.encode(new SigningService(privateKey).publicKey);
 
   if (flags.out === '-') {
-    // `--json` is promised on every command, so this path cannot keep printing a
-    // bare line. The private key is included here, and only here: writing it into
-    // the JSON of a file-bound keygen would copy the secret out of the 0600 file
-    // and into whatever consumes the output.
-    context.stdout.write(
-      context.json
-        ? toJsonLine(keygenJson('-', HexConverter.encode(new SigningService(privateKey).publicKey), hex))
-        : `${hex}\n`,
-    );
+    // The private key is in the JSON on this path only: stdout is where it was
+    // asked to go. A file-bound keygen must not copy the secret back out of the
+    // 0600 file and into whatever reads the output.
+    context.stdout.write(context.json ? toJsonLine(keygenJson(null, publicKey, hex)) : `${hex}\n`);
     return EXIT_OK;
   }
 
@@ -100,7 +96,6 @@ export async function runKeygen(flags: IKeygenFlags, context: ICommandContext): 
     await writeKeyFile(out, `${hex}\n`);
   }
 
-  const publicKey = HexConverter.encode(new SigningService(privateKey).publicKey);
   context.stdout.write(context.json ? toJsonLine(keygenJson(out, publicKey)) : `${keygenText(out, publicKey)}\n`);
   return EXIT_OK;
 }
