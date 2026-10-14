@@ -289,8 +289,18 @@ Expected: the digest from Step 1. If the line numbers moved, the appendix was ed
 
 - [ ] **Step 5: Verify no stale brand references remain outside the appendix**
 
-Run: `head -214 README.md | grep -n 'unicity-timestamp\|timestamp-cli'`
+Run: `head -214 README.md | grep -nI 'unicity-timestamp\|timestamp-cli\|Timestamp CLI\|Unicity Timestamp'`
 Expected: no output.
+
+The last two patterns matter: the H1 title reads `# Unicity Timestamp CLI`,
+which is Title Case and space-separated, so Step 2's substitutions do not touch
+it and a check using only their patterns cannot see it. Change the title to
+`# Unicity Proof CLI` as part of Step 2.
+
+Do **not** broaden this to a case-insensitive search for `timestamp`. The README
+uses the English word legitimately throughout — "round timestamp", "A timestamp
+is an attestation", "classic timestamp authority" — and all of it stays. Only
+the product name is being renamed.
 
 - [ ] **Step 6: Commit**
 
@@ -404,7 +414,7 @@ Expected: `OK` twice. These tokens were certified before the rename; this is the
 
 - [ ] **Step 3: Confirm the old name survives only where it must**
 
-Run: `grep -rlI 'unicity-timestamp' src tests README.md | sort`
+Run: `grep -rlI 'unicity-timestamp\|Timestamp CLI\|Unicity Timestamp' src tests README.md | sort`
 Expected exactly these three files:
 
 ```
