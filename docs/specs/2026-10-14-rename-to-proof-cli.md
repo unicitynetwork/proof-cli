@@ -204,11 +204,12 @@ from the user's side.
 
 ## Risks
 
-| Risk                                                     | Mitigation                                                                                        |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| The frozen tag is renamed later for consistency          | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                    |
-| The README appendix is caught by a file-wide replace     | Both sections named as frozen above; review the README diff line by line                          |
-| `latest` ends up below 0.2.0                             | The first publish is manual from a commit that already carries 0.2.0; no workflow run computes it |
-| Releases break after the repository rename               | Step 8                                                                                            |
-| Users on the old package never learn of the move         | Step 6's deprecation message appears on install                                                   |
-| The old repository name is recreated, breaking redirects | Do not create a repository named `timestamp-cli` in the organisation                              |
+| Risk                                                     | Mitigation                                                                                                                          |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| The frozen tag is renamed later for consistency          | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                      |
+| The README appendix is caught by a file-wide replace     | Both sections named as frozen above; review the README diff line by line                                                            |
+| `latest` ends up on a release candidate                  | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version |
+| Releases break after the repository rename               | Step 8                                                                                                                              |
+| Users on the old package never learn of the move         | Step 5's deprecation message appears on install                                                                                     |
+| 0.2.0 ships without a provenance attestation             | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                   |
+| The old repository name is recreated, breaking redirects | Do not create a repository named `timestamp-cli` in the organisation                                                                |
