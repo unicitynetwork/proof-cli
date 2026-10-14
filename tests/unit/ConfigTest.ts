@@ -206,7 +206,7 @@ describe('resolveStampConfig', () => {
     let directory: string;
 
     beforeEach(async () => {
-      directory = await tempDir('timestamp-cli-out-');
+      directory = await tempDir('proof-cli-out-');
     });
 
     afterEach(async () => {

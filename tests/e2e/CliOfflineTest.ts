@@ -7,11 +7,11 @@ import { tempDir, TEST_DIGEST_HEX } from '../support/fixtures.js';
 const TIMEOUT = 30_000;
 const INCLUSION_PROOF_BYTE_OFFSET = 700;
 
-describe('unicity-timestamp (offline)', () => {
+describe('unicity-proof (offline)', () => {
   let cwd: string;
 
   beforeAll(async () => {
-    cwd = await tempDir('timestamp-cli-e2e-');
+    cwd = await tempDir('proof-cli-e2e-');
   });
 
   it(
@@ -107,7 +107,7 @@ describe('unicity-timestamp (offline)', () => {
     async () => {
       const envFile = path.join(cwd, 'custom.env');
       await writeFile(envFile, 'UNICITY_NETWORK=devnet\n');
-      const dotenvDir = await tempDir('timestamp-cli-dotenv-');
+      const dotenvDir = await tempDir('proof-cli-dotenv-');
       await writeFile(path.join(dotenvDir, '.env'), 'UNICITY_NETWORK=devnet\n');
       const args = [
         'stamp',
@@ -229,7 +229,7 @@ describe('unicity-timestamp (offline)', () => {
     async () => {
       // A token plus a .env naming the trust base that validates it would
       // otherwise be a complete forgery kit, and the verdict would not say so.
-      const directory = await tempDir('timestamp-cli-dotenv-');
+      const directory = await tempDir('proof-cli-dotenv-');
       const mainnetTrustBase = path.resolve('src/trust-bases/bft-trustbase.mainnet.json');
       const fixture = path.resolve('tests/fixtures/testnet2-anonymous.cbor');
       await writeFile(path.join(directory, '.env'), `UNICITY_TRUST_BASE=${mainnetTrustBase}\n`);

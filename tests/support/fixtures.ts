@@ -19,7 +19,7 @@ export const TEST_PUBLIC_KEY_HEX = '031b84c5567b126440995d3ed5aaba0565d71e183460
 const handedOut: string[] = [];
 
 /** Fresh temporary directory under the OS temp root, removed when the file finishes. */
-export async function tempDir(prefix = 'timestamp-cli-'): Promise<string> {
+export async function tempDir(prefix = 'proof-cli-'): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   handedOut.push(directory);
   return directory;

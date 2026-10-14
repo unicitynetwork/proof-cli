@@ -14,7 +14,7 @@ const NETWORKS = [
 const targetDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'trust-bases');
 
 async function fetchText(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'unicity-timestamp-cli' } });
+  const response = await fetch(url, { headers: { 'User-Agent': 'unicity-proof-cli' } });
   if (!response.ok) {
     throw new Error(`GET ${url} failed with HTTP ${response.status}`);
   }

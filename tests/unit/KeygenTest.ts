@@ -13,7 +13,7 @@ describe('runKeygen under a umask that masks owner bits', () => {
   let previousUmask: number;
 
   beforeEach(async () => {
-    directory = await tempDir('timestamp-cli-umask-');
+    directory = await tempDir('proof-cli-umask-');
     previousUmask = process.umask(0o477);
   });
 
@@ -41,7 +41,7 @@ describe('runKeygen when the staged write cannot complete', () => {
   let directory: string;
 
   beforeEach(async () => {
-    directory = await tempDir('timestamp-cli-keygen-fail-');
+    directory = await tempDir('proof-cli-keygen-fail-');
   });
 
   afterEach(async () => {

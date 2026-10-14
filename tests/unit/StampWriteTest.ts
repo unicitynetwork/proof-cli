@@ -15,7 +15,7 @@ describe('writeCertifiedToken', () => {
   let directory: string;
 
   beforeEach(async () => {
-    directory = await tempDir('timestamp-cli-write-');
+    directory = await tempDir('proof-cli-write-');
   });
 
   it('writes the token and nothing else', async () => {
