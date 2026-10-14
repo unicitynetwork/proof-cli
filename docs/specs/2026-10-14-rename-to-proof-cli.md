@@ -1,7 +1,7 @@
 # Rename to @unicitylabs/proof-cli
 
 Date: 2026-10-14
-Status: approved, not yet implemented
+Status: proposed
 
 ## Why
 
@@ -22,14 +22,21 @@ Agent-specific fields are a later payload version, not part of this change. See
 | repository  | `unicitynetwork/timestamp-cli` | `unicitynetwork/proof-cli` |
 | version     | 0.1.2                          | 0.2.0                      |
 
-Subcommands do not change: `stamp`, `verify`, `inspect`, `keygen`. Every
-documented invocation and any script a user already has keeps working apart
-from the binary name, and the diff stays about the name.
-
-`UNICITY_*` environment variables do not change.
+Subcommands (`stamp`, `verify`, `inspect`, `keygen`), flags and `UNICITY_*`
+environment variables do not change.
 
 0.2.0 rather than 0.1.3: the install command changes, which is the most
 user-visible break the project has had. The project stays on 0.x.
+
+Two things break for users:
+
+- the binary name, `unicity-timestamp` to `unicity-proof`;
+- the default key file `keygen` writes when given no `--out`,
+  `unicity-timestamp.key` to `unicity-proof.key`. A script that runs `keygen`
+  and then passes `--key-file unicity-timestamp.key` fails with "Cannot read key
+  file" until it is updated. Nothing in the code reads the default — signing
+  resolves a key from `--key-file` or `UNICITY_PRIVATE_KEY` — so the break is
+  confined to scripts that hardcode the old name.
 
 ## The identifier that does not move
 
@@ -40,7 +47,8 @@ identifier of the token format, not a label. Three things derive from it:
   and the issuance verifier is registered for exactly that type;
 - the burn predicate's reason bytes are its UTF-8 encoding, so it determines the
   recipient every timestamp token is locked to;
-- it is the domain tag inside the signed message, `SHA-256(CBOR["unicity-timestamp", 1, digest])`.
+- it is the domain tag inside the signed message,
+  `SHA-256(CBOR["unicity-timestamp", 1, digest])`.
 
 Changing it produces a different token type, a different recipient and a
 different signature domain. Every stamp already certified on mainnet and
@@ -51,8 +59,24 @@ final.
 therefore disagree on purpose. A reader who renames the constant to match the
 product name breaks every existing proof.
 
-The same applies to the two comments in `src/lib/TimestampPayload.ts` that spell
-out the signed message. They document bytes that already exist.
+This change adds a sentence to the comment on `TIMESTAMP_TAG` saying so. The
+comment currently explains only why the tag carries no version, which is not
+what a contributor doing a consistency sweep needs to read.
+
+The same freeze covers every other place the tag appears as a format
+description, none of which may be touched by a search and replace:
+
+- `src/lib/TimestampPayload.ts`, the two comments spelling out the signed
+  message;
+- `README.md` section `### Token file format`, which gives the burn reason as
+  `bstr("unicity-timestamp")`, the token type as `SHA-256("unicity-timestamp")`,
+  and the signature domain;
+- `README.md` section `### Deferred decisions`, which derives the token type
+  again and tells the reader to reproduce it with
+  `printf 'unicity-timestamp' | shasum -a 256`.
+
+A file-wide replace through the README would leave the appendix documenting a
+burn reason, token type and signature domain that no token has.
 
 ## What changes
 
@@ -60,8 +84,9 @@ Brand and user-visible surface:
 
 - `package.json`: `name`, `bin`, `description`, `keywords`, `repository`,
   `homepage`, `bugs`
-- `src/cli.ts`: the `.name()` passed to Commander, and the `--out` help text
-  naming the default key file
+- `package-lock.json`: the package name at the root and in the `""` package entry
+- `src/cli.ts`: `.name()`, `.description()` — the sentence `--help` prints — and
+  the `--out` help text naming the default key file
 - `src/output.ts`: the recovery hint printed when a certified stamp cannot be
   written. It tells the reader which command recovers the token from the hex on
   stderr, so a stale binary name there costs a paid-for stamp
@@ -69,11 +94,9 @@ Brand and user-visible surface:
 - `.github/workflows/npm.yml`: the registry pre-check, the release-notes URL,
   and the trusted-publisher instructions in the header comment
 - `scripts/update-trust-bases.mjs`: the `User-Agent` sent to GitHub
-- `.env.example`, `README.md`
+- `.env.example`
+- `README.md` everywhere except the two frozen sections above
 - `tests/`: `describe` titles and `tempDir` prefixes
-
-`DEFAULT_KEY_FILE` is safe to change. Nothing reads it; `keygen` only writes it,
-and signing resolves a key from `--key-file` or `UNICITY_PRIVATE_KEY`.
 
 ## What stays
 
@@ -84,36 +107,67 @@ names. These identify the format, which is not being renamed.
 The convention this establishes: `TIMESTAMP_*` means the wire format and is
 frozen; `proof` means the product and is free to change.
 
-## Migration order
+## Migration
 
-1. Rename the repository on GitHub. Requires organisation admin. Web and git
-   redirects are permanent; working copies should still have their remote
-   updated.
-2. Land the rename: code, docs and workflow strings, reviewed as one change.
-3. Publish `@unicitylabs/proof-cli@0.2.0` manually. npm's trusted publishing
-   cannot create a package name the publisher does not already own, so the first
-   publish of a new name cannot come from CI.
-4. Configure the new package's trusted publisher: repository
-   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`.
-   The binding is per package and per repository name, so nothing from the old
-   package's configuration carries over.
-5. Cut one release through the workflow to prove step 4.
+The package rename and the repository rename are separable. The package rename
+needs no organisation admin and carries no redirect risk; the repository rename
+needs both. The new package needs its own trusted publisher either way — only
+its repository value differs — so neither rename avoids that step.
+
+### Package rename
+
+1. Land the rename with the version set to 0.2.0 in `package.json`,
+   `package-lock.json` and `src/version.ts`, which `VersionTest` checks against
+   the manifest. This is the one release the release workflow cannot own: npm's
+   trusted publishing cannot create a package name the publisher does not
+   already own, so the first publish under a new name cannot come from CI, and
+   the version therefore has to be in the commit that gets published.
+2. `npm publish --access public` from that commit.
+3. Create the `v0.2.0` tag and the GitHub release by hand, after the publish, in
+   the order the workflow uses.
+4. Configure the new package's trusted publisher: the repository as it is named
+   at the time, workflow `npm.yml`, environment `npm-publish`.
+5. Cut one release through the workflow to prove step 4. It produces 0.2.1;
+   0.2.0 is the one version CI did not build.
 6. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
    The old versions stay installable. Unpublishing would break existing
    lockfiles.
 
-Steps 1, 3, 4 and 6 need registry or organisation credentials.
+Do not let a workflow run compute the first version under the new name.
+`npm publish` moves the `latest` dist-tag to whatever it publishes without
+comparing versions, so a run that computed 0.1.3 from a stale manifest would
+leave `latest` pointing below 0.2.0.
+
+### Repository rename
+
+7. Rename the repository on GitHub. Requires organisation admin. Update the
+   remote in any working copy.
+8. Re-point the new package's trusted publisher at the new repository name, if
+   step 4 ran before the rename.
+
+GitHub redirects the old paths only until a repository with the old name is
+created in the organisation, so the redirect is not a permanent guarantee. Every
+published 0.1.x tarball carries `repository`, `homepage` and `bugs` URLs naming
+the old repository for as long as anyone installs those versions.
+
+Steps 2, 4, 6, 7 and 8 need registry or organisation credentials.
 
 ## Verification
 
-The regression that matters is that a token minted by the old CLI still verifies
-under the new one. `tests/fixtures/testnet2-*.cbor` were certified before the
-rename and carry the frozen tag in their burn reason, so the offline end-to-end
-suite already proves it.
+The regression that matters is that a token certified before the rename still
+verifies after it. Two layers cover the frozen tag:
 
-**Do not run `UNICITY_E2E_WRITE_FIXTURES=1` as part of this change.** Those
-fixtures are the only evidence the tag held. Regenerating them would make the
-test agree with whatever the change broke.
+- `ConstantsTest` pins the SHA-256 of the tag against the token type hex, the
+  burn-reason bytes, and the encoded recipient predicate. A renamed tag fails the
+  unit suite before any fixture is read.
+- `tests/fixtures/testnet2-*.cbor` were certified before the rename and carry the
+  tag in their burn reason, so the offline end-to-end suite proves that real
+  tokens minted by the old release still verify.
+
+**Do not run `UNICITY_E2E_WRITE_FIXTURES=1` as part of this change.** It would
+replace the pre-rename evidence with tokens minted by the code under test. That
+would not hide a renamed tag, since `ConstantsTest` catches it, but it would
+discard the only artifacts in the repository that predate the change.
 
 Also required:
 
@@ -121,7 +175,7 @@ Also required:
 - `npm pack` on the renamed package, checking the `bin` entry resolves to
   `unicity-proof` and the tarball contents match a dry run
 - `unicity-proof verify` against both committed fixtures, and against a token
-  stamped by 0.1.2 from the registry
+  stamped by `@unicitylabs/timestamp-cli@0.1.2` from the registry
 
 ## Out of scope
 
@@ -138,8 +192,11 @@ from the user's side.
 
 ## Risks
 
-| Risk                                             | Mitigation                                                                 |
-| ------------------------------------------------ | -------------------------------------------------------------------------- |
-| The frozen tag is renamed later for consistency  | Documented here and at the constant; the fixtures fail if it moves         |
-| Releases break after the repository rename       | Step 4; the old package needs no further release, so its binding can lapse |
-| Users on the old package never learn of the move | Step 6's deprecation message appears on install                            |
+| Risk                                                     | Mitigation                                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| The frozen tag is renamed later for consistency          | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                    |
+| The README appendix is caught by a file-wide replace     | Both sections named as frozen above; review the README diff line by line                          |
+| `latest` ends up below 0.2.0                             | The first publish is manual from a commit that already carries 0.2.0; no workflow run computes it |
+| Releases break after the repository rename               | Step 8                                                                                            |
+| Users on the old package never learn of the move         | Step 6's deprecation message appears on install                                                   |
+| The old repository name is recreated, breaking redirects | Do not create a repository named `timestamp-cli` in the organisation                              |
