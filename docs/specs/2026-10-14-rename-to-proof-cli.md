@@ -116,41 +116,53 @@ its repository value differs — so neither rename avoids that step.
 
 ### Package rename
 
-1. Land the rename with the version set to 0.2.0 in `package.json`,
-   `package-lock.json` and `src/version.ts`, which `VersionTest` checks against
-   the manifest. This is the one release the release workflow cannot own: npm's
-   trusted publishing cannot create a package name the publisher does not
-   already own, so the first publish under a new name cannot come from CI, and
-   the version therefore has to be in the commit that gets published.
-2. `npm publish --access public` from that commit.
-3. Create the `v0.2.0` tag and the GitHub release by hand, after the publish, in
-   the order the workflow uses.
-4. Configure the new package's trusted publisher: the repository as it is named
+npm's trusted publishing cannot create a package name the publisher does not
+already own, so one publish has to happen by hand. That publish is a
+prerelease whose only purpose is to make the name exist, which keeps the real
+0.2.0 on the audited path.
+
+1. Land the rename. The release workflow owns versions, so the rename commit
+   carries no bump and stays at 0.1.2.
+2. Bootstrap the name by hand: `npm version 0.2.0-rc1 --no-git-tag-version`,
+   which regenerates `src/version.ts` through the `version` lifecycle script and
+   keeps `VersionTest` green, then `npm publish --access public --tag next`.
+   Discard the local bump afterwards.
+
+   **`--tag next` is required.** npm points `latest` at whatever it publishes,
+   prerelease or not, so without it a plain `npm install @unicitylabs/proof-cli`
+   would hand everyone a release candidate. The workflow derives the same tag
+   from the version itself; this publish is the one that does not go through it.
+
+3. Configure the new package's trusted publisher: the repository as it is named
    at the time, workflow `npm.yml`, environment `npm-publish`.
-5. Cut one release through the workflow to prove step 4. It produces 0.2.1;
-   0.2.0 is the one version CI did not build.
-6. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
+4. Run the release workflow with `0.2.0` as the explicit version input. It
+   bumps, builds, tests, publishes to `latest`, pushes the bump with its tag and
+   creates the release.
+5. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
    The old versions stay installable. Unpublishing would break existing
    lockfiles.
+6. Optionally `npm dist-tag rm @unicitylabs/proof-cli next` once 0.2.0 is on
+   `latest`.
 
-Do not let a workflow run compute the first version under the new name.
-`npm publish` moves the `latest` dist-tag to whatever it publishes without
-comparing versions, so a run that computed 0.1.3 from a stale manifest would
-leave `latest` pointing below 0.2.0.
+Publishing 0.2.0 from the workflow rather than by hand is what earns it a
+provenance attestation: 0.1.2, released through the workflow, carries an SLSA
+predicate, and 0.1.0, published by hand to bootstrap the current name, carries
+none. Under this order the unattested artifact is a release candidate on a tag
+nothing resolves by default.
 
 ### Repository rename
 
 7. Rename the repository on GitHub. Requires organisation admin. Update the
    remote in any working copy.
 8. Re-point the new package's trusted publisher at the new repository name, if
-   step 4 ran before the rename.
+   step 3 ran before the rename.
 
 GitHub redirects the old paths only until a repository with the old name is
 created in the organisation, so the redirect is not a permanent guarantee. Every
 published 0.1.x tarball carries `repository`, `homepage` and `bugs` URLs naming
 the old repository for as long as anyone installs those versions.
 
-Steps 2, 4, 6, 7 and 8 need registry or organisation credentials.
+Steps 2, 3, 5, 6, 7 and 8 need registry or organisation credentials.
 
 ## Verification
 
