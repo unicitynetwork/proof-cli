@@ -127,10 +127,27 @@ git commit -m "Rename the package to @unicitylabs/proof-cli"
 In `tests/e2e/CliOfflineTest.ts`, add to the existing `prints help and version` test, after the `-v, --version` assertion:
 
 ```ts
-// The installed command name and the name the help prints have to agree,
-// or the help tells the reader to run something not on their PATH.
-expect(help.stdout).toContain('unicity-proof');
-expect(help.stdout).not.toContain('unicity-timestamp');
+// The installed command name and the name the help prints have to agree, or
+// the help tells the reader to run something that is not on their PATH. The
+// whole usage line is asserted rather than a substring, so a stale name cannot
+// hide in it — and the old name is deliberately absent from this file, because
+// Task 4 and Task 5 grep the tree for it.
+expect(help.stdout.split('\n')[0]).toEqual('Usage: unicity-proof [options] [command]');
+```
+
+The `--out` default is a separate string in a different help screen, so it gets
+its own assertion. Add this test next to the one above:
+
+```ts
+it(
+  'names the default key file in the keygen help',
+  async () => {
+    const keygenHelp = await runCli(['keygen', '--help'], { cwd });
+    expect(keygenHelp.code).toBe(0);
+    expect(keygenHelp.stdout).toContain('unicity-proof.key');
+  },
+  TIMEOUT,
+);
 ```
 
 - [ ] **Step 2: Write the failing test for the default key file**
@@ -338,9 +355,12 @@ Run: `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/npm.ym
 Expected: `yaml ok`
 
 Run: `grep -rnI 'timestamp-cli\|unicity-timestamp' .github .env.example scripts tests`
-Expected: no output. `-I` skips `tests/fixtures/*.cbor`, which carry the tag in
-their burn reason by design; without it grep reports them as binary matches and
-the check looks failed when it passed.
+Expected: no output. Two things make that achievable: `-I` skips
+`tests/fixtures/*.cbor`, which carry the tag in their burn reason by design and
+would otherwise be reported as binary matches; and Task 2's assertions were
+written without the old name in them, so no test file contains it. If this grep
+returns a hit inside `tests/`, a test embedded the literal — fix the test
+rather than loosening this check.
 
 - [ ] **Step 5: Run the suite and lint**
 
@@ -384,7 +404,7 @@ Expected: `OK` twice. These tokens were certified before the rename; this is the
 
 - [ ] **Step 3: Confirm the old name survives only where it must**
 
-Run: `grep -rlnI 'unicity-timestamp' src tests README.md | sort`
+Run: `grep -rlI 'unicity-timestamp' src tests README.md | sort`
 Expected exactly these three files:
 
 ```
@@ -396,7 +416,8 @@ src/lib/constants.ts
 Any other file is a missed rename. `-I` is required: the two
 `tests/fixtures/*.cbor` files contain the tag in their burn reason — which is
 the whole point of keeping them — and `grep -l` reports binary matches rather
-than skipping them, so without `-I` this check can never pass.
+than skipping them, so without `-I` this check can never pass. `-l` also
+suppresses line numbers, so `-n` is not used here.
 
 - [ ] **Step 4: Confirm the package would publish correctly**
 
@@ -470,11 +491,34 @@ gh pr create --title "Rename the CLI to @unicitylabs/proof-cli" --body-file ../p
 
 ## Operator steps after merge
 
-These need registry or organisation credentials and are not part of the code change. They are migration steps 2 through 8 of the spec, in order:
+These need registry or organisation credentials and are not part of the code
+change. **The repository rename comes first**, because this branch points
+`repository`, `homepage` and `bugs` at `unicitynetwork/proof-cli`, and npm
+requires a package's `repository` to match, case-sensitively, the repository it
+is publishing with provenance from. Publishing from a repository still named
+`timestamp-cli` with those URLs in the manifest fails.
 
-1. `npm version 0.2.0-rc1 --no-git-tag-version`, then `npm publish --access public --tag next`. Discard the local bump. **`--tag next` is required** — npm points `latest` at whatever it publishes, prerelease or not.
-2. Configure the new package's trusted publisher: repository as currently named, workflow `npm.yml`, environment `npm-publish`.
-3. Run the release workflow with `0.2.0` as the explicit version input.
-4. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
-5. Optionally `npm dist-tag rm @unicitylabs/proof-cli next`.
-6. Rename the repository on GitHub, then re-point the trusted publisher at the new repository name.
+1. Rename the repository on GitHub to `proof-cli`. Organisation admin. Update
+   the remote in any working copy.
+2. Merge this branch.
+3. `npm version 0.2.0-rc1 --no-git-tag-version`, then
+   `npm publish --access public --tag next`. Discard the local bump.
+   **`--tag next` is required** — npm points `latest` at whatever it publishes,
+   prerelease or not.
+4. Configure the new package's trusted publisher: repository
+   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`.
+5. Run the release workflow with `0.2.0` as the explicit version input.
+   **Within two days of step 4.** A new trusted-publisher configuration has to
+   complete its first successful publish inside that window; after it, the
+   configuration expires and can no longer be used or edited, and has to be
+   recreated. Do not configure the publisher until ready to release.
+6. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
+7. Optionally `npm dist-tag rm @unicitylabs/proof-cli next`.
+8. Optionally restrict token publishing on the new package — npm Settings,
+   Publishing access, "Require two-factor authentication and disallow tokens".
+   Configuring a trusted publisher does not do this on its own, and the
+   bootstrap token from step 3 keeps working until it is done.
+
+Step 4's binding is to the repository's immutable identity, which survives a
+later rename, so re-pointing it is only needed if the repository is renamed
+again after the binding is made.
