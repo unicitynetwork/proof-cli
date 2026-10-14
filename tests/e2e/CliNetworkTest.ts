@@ -80,6 +80,19 @@ describeNetwork(`unicity-timestamp against ${TEST_NETWORK}`, () => {
   );
 
   it(
+    'puts the JSON object on stdout even when the token would go there',
+    async () => {
+      const result = await runCli(['stamp', otherDigest, '--out', '-', '--json'], { cwd, env });
+      expect(result.code).toBe(0);
+      const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(parsed).toMatchObject({ command: 'stamp', out: null });
+      expect(parsed.token).toMatch(/^[0-9a-f]+$/);
+      expect(parsed).toMatchObject({ hash: { algorithm: 'SHA-256', digest: otherDigest } });
+    },
+    TIMEOUT,
+  );
+
+  it(
     'stamps with a generated key and reports the signer',
     async () => {
       const keyFile = path.join(cwd, 'signer.key');

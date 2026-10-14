@@ -71,13 +71,14 @@ export async function runStamp(
 
   const bytes = token.toCBOR();
   const out = config.out === '-' ? null : path.resolve(config.out);
-  if (out === null) {
+  const tokenToStdout = out === null && !context.json;
+  if (tokenToStdout) {
     context.stdout.write(bytes);
-  } else {
+  } else if (out !== null) {
     await writeCertifiedToken(out, bytes, config.force, context);
   }
 
-  const summary = out === null ? context.stderr : context.stdout;
+  const summary = tokenToStdout ? context.stderr : context.stdout;
   const description = describeToken(token);
   summary.write(
     context.json

@@ -1,19 +1,9 @@
 import { chmod, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { ICommandContext } from '../../src/commands/context.js';
 import { runKeygen } from '../../src/commands/keygen.js';
+import { testContext } from '../support/context.js';
 import { tempDir } from '../support/fixtures.js';
-
-function context(): ICommandContext {
-  return {
-    interrupt: new AbortController().signal,
-    json: false,
-    stderr: { write: (): boolean => true },
-    stdin: process.stdin,
-    stdout: { write: (): boolean => true },
-  };
-}
 
 // `writeFile`'s mode is masked by the process umask, so a umask covering owner
 // bits would otherwise produce a key file at 0200 or 0000 -- unreadable by the
@@ -33,7 +23,7 @@ describe('runKeygen under a umask that masks owner bits', () => {
 
   it('still creates a readable 0600 key', async () => {
     const out = path.join(directory, 'fresh.key');
-    await runKeygen({ out }, context());
+    await runKeygen({ out }, testContext().context);
     expect((await stat(out)).mode & 0o777).toBe(0o600);
     expect((await readFile(out, 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -41,7 +31,7 @@ describe('runKeygen under a umask that masks owner bits', () => {
   it('still creates a readable 0600 key when replacing an existing file', async () => {
     const out = path.join(directory, 'existing.key');
     await writeFile(out, 'placeholder\n', { mode: 0o644 });
-    await runKeygen({ force: true, out }, context());
+    await runKeygen({ force: true, out }, testContext().context);
     expect((await stat(out)).mode & 0o777).toBe(0o600);
     expect((await readFile(out, 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -66,7 +56,7 @@ describe('runKeygen when the staged write cannot complete', () => {
     await writeFile(out, 'placeholder\n', { mode: 0o600 });
     await chmod(directory, 0o500);
 
-    await expect(runKeygen({ force: true, out }, context())).rejects.toThrow(/EACCES|EPERM/);
+    await expect(runKeygen({ force: true, out }, testContext().context)).rejects.toThrow(/EACCES|EPERM/);
 
     await chmod(directory, 0o700);
     expect(await readdir(directory)).toEqual(['target.key']);

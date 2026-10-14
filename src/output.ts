@@ -27,7 +27,7 @@ export interface IDescriptionJson {
   readonly payloadError: string | null;
   readonly recipientIsTimestampBurn: boolean;
   readonly referenceTime: string;
-  readonly referenceTimeIso: string;
+  readonly referenceTimeIso: string | null;
   readonly round: { readonly epoch: string; readonly number: string; readonly timestamp: string };
   readonly signer: string | null;
   readonly tokenId: string;
@@ -71,7 +71,10 @@ export interface INotATokenJson {
 
 export interface IKeygenJson {
   readonly command: 'keygen';
-  readonly out: string;
+  /** Null when the key went to stdout, as in `stamp`. */
+  readonly out: string | null;
+  /** Present only when the key went to stdout; otherwise it is in the file at `out`. */
+  readonly privateKey?: string;
   readonly publicKey: string;
 }
 
@@ -88,10 +91,19 @@ export function line(label: string, value: string): string {
 
 /**
  * @param {bigint} seconds Unix seconds.
- * @returns {string} ISO 8601 UTC without milliseconds.
+ * @returns {string|null} ISO 8601 UTC without milliseconds, or null if no Date can hold it.
+ */
+export function toIso(seconds: bigint): string | null {
+  const date = new Date(Number(seconds) * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().replace('.000Z', 'Z');
+}
+
+/**
+ * @param {bigint} seconds Unix seconds.
+ * @returns {string} ISO 8601 UTC without milliseconds, or a sentinel for the text output.
  */
 export function formatIso(seconds: bigint): string {
-  return new Date(Number(seconds) * 1000).toISOString().replace('.000Z', 'Z');
+  return toIso(seconds) ?? `out of range (${seconds})`;
 }
 
 /**
@@ -171,6 +183,17 @@ function hashLabel(description: ITimestampDescription): string {
     : `unreadable (${description.payloadError ?? 'no payload'})`;
 }
 
+// Relies on `verify` failing closed: an OK result with no comparison can only
+// mean no digest was given, never that the check was skipped.
+function expectedHashLabel(result: ITimestampVerificationResult): string {
+  if (result.expectedDigestMatches !== null) {
+    return result.expectedDigestMatches ? 'matches' : 'differs';
+  }
+  return result.status === 'OK'
+    ? 'not checked; pass --file or --hash to confirm the token is for your document'
+    : 'not checked; verification failed';
+}
+
 function signerLabel(description: ITimestampDescription): string {
   const signer = description.payload?.signer ?? null;
   return signer ? HexConverter.encode(signer) : 'none (anonymous stamp)';
@@ -226,13 +249,10 @@ export function verifyText(result: ITimestampVerificationResult, source: TrustBa
     line('Network', networkLabel(result.networkId.id)),
     line('Trust base', trustBaseLabel(source)),
     line('Hash', hashLabel(result)),
+    line('Expected hash', expectedHashLabel(result)),
+    line('Signer', signerLabel(result)),
+    ...timeLines(result),
   ];
-  if (result.expectedDigestMatches === null) {
-    lines.push(line('Expected hash', 'not checked; pass --file or --hash to confirm the token is for your document'));
-  } else {
-    lines.push(line('Expected hash', result.expectedDigestMatches ? 'matches' : 'differs'));
-  }
-  lines.push(line('Signer', signerLabel(result)), ...timeLines(result));
   if (result.status !== 'OK' && result.details !== null) {
     lines.push('', result.details.toString());
   }
@@ -268,8 +288,8 @@ export function keygenText(out: string, publicKey: string): string {
   return [line('Key written', `${out} (mode 0600)`), line('Public key', publicKey)].join('\n');
 }
 
-export function keygenJson(out: string, publicKey: string): IKeygenJson {
-  return { command: 'keygen', out, publicKey };
+export function keygenJson(out: string | null, publicKey: string, privateKey?: string): IKeygenJson {
+  return { command: 'keygen', out, privateKey, publicKey };
 }
 
 /**
@@ -299,7 +319,7 @@ export function descriptionJson(description: ITimestampDescription): IDescriptio
     payloadError: description.payloadError,
     recipientIsTimestampBurn: description.recipientIsTimestampBurn,
     referenceTime: description.referenceTime.toString(),
-    referenceTimeIso: formatIso(description.referenceTime),
+    referenceTimeIso: toIso(description.referenceTime),
     round: {
       epoch: description.epoch.toString(),
       number: description.roundNumber.toString(),

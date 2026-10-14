@@ -1,6 +1,6 @@
 import { ICommandContext } from './context.js';
 import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
-import { INetworkFlags, resolveDigest, resolveTrustBaseOverride } from '../config.js';
+import { assertOneDigestSource, INetworkFlags, resolveDigest, resolveTrustBaseOverride } from '../config.js';
 import { EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
 import { bundledTrustBase, ITrustBaseChoice, networkNameForId, TrustBaseSource } from '../lib/networks.js';
 import { describeToken, ITimestampVerificationResult, verificationFailure, verify } from '../lib/TimestampClient.js';
@@ -30,6 +30,11 @@ function report(
  * @returns {Promise<number>} Exit code.
  */
 export async function runVerify(file: string, flags: IVerifyFlags, context: ICommandContext): Promise<number> {
+  // Before anything is read: the paths below report a token they cannot place as
+  // a failed verification, which would answer a contradictory command line with
+  // exit 1 and no mention of the contradiction.
+  assertOneDigestSource(flags.hash, flags.file, '--hash');
+
   const decoded = await decodeToken(await readTokenInput(file, context.stdin));
   if (decoded.token === null) {
     return reportNotAToken(context, 'verify', decoded.error);

@@ -5,6 +5,7 @@ import { runCli } from '../support/cli.js';
 import { tempDir, TEST_DIGEST_HEX } from '../support/fixtures.js';
 
 const TIMEOUT = 30_000;
+const INCLUSION_PROOF_BYTE_OFFSET = 700;
 
 describe('unicity-timestamp (offline)', () => {
   let cwd: string;
@@ -149,6 +150,19 @@ describe('unicity-timestamp (offline)', () => {
       expect(piped.code).toBe(0);
       expect(piped.stdout.trim()).toMatch(/^[0-9a-f]{64}$/);
       expect(piped.stderr).toEqual('');
+
+      for (const args of [
+        ['keygen', '--out', '-', '--json'],
+        ['--json', 'keygen', '--out', '-'],
+      ]) {
+        const pipedJson = await runCli(args, { cwd });
+        expect({ args, code: pipedJson.code }).toEqual({ args, code: 0 });
+        const parsed = JSON.parse(pipedJson.stdout) as Record<string, unknown>;
+        expect(parsed).toMatchObject({ command: 'keygen', out: null });
+        expect(parsed.publicKey).toMatch(/^[0-9a-f]{66}$/);
+        expect(parsed.privateKey).toMatch(/^[0-9a-f]{64}$/);
+      }
+      expect(JSON.parse(forced.stdout) as Record<string, unknown>).not.toHaveProperty('privateKey');
     },
     TIMEOUT,
   );
@@ -227,14 +241,31 @@ describe('unicity-timestamp (offline)', () => {
       bytes[bytes.length - 1] ^= 0x01;
       await writeFile(tampered, bytes);
 
-      const [anonymousResult, signedResult, mismatch, wrongNetwork, tamperedResult, inspected] = await Promise.all([
-        runCli(['verify', anonymous, '--json'], { cwd }),
-        runCli(['verify', path.join(fixtures, 'testnet2-signed.cbor'), '--json'], { cwd }),
-        runCli(['verify', anonymous, '--hash', TEST_DIGEST_HEX], { cwd }),
-        runCli(['verify', anonymous, '--network', 'mainnet'], { cwd }),
-        runCli(['verify', tampered], { cwd }),
-        runCli(['inspect', anonymous, '--json'], { cwd }),
-      ]);
+      // The last byte truncates the CBOR, so the decoder rejects it before any
+      // verification runs. Only a byte inside the proof reaches the cryptography.
+
+      const forged = path.join(cwd, 'forged.cbor');
+      const forgedBytes = new Uint8Array(await readFile(anonymous));
+      forgedBytes[INCLUSION_PROOF_BYTE_OFFSET] ^= 0x01;
+      await writeFile(forged, forgedBytes);
+
+      const [anonymousResult, signedResult, mismatch, wrongNetwork, tamperedResult, forgedResult, inspected] =
+        await Promise.all([
+          runCli(['verify', anonymous, '--json'], { cwd }),
+          runCli(['verify', path.join(fixtures, 'testnet2-signed.cbor'), '--json'], { cwd }),
+          runCli(['verify', anonymous, '--hash', TEST_DIGEST_HEX], { cwd }),
+          runCli(['verify', anonymous, '--network', 'mainnet'], { cwd }),
+          runCli(['verify', tampered], { cwd }),
+          runCli(['verify', forged, '--hash', TEST_DIGEST_HEX, '--json'], { cwd }),
+          runCli(['inspect', anonymous, '--json'], { cwd }),
+        ]);
+
+      expect(forgedResult.code).toBe(1);
+      expect(JSON.parse(forgedResult.stdout)).toMatchObject({
+        expectedHashMatches: null,
+        reason: 'Inclusion proof verification failed: PATH_INVALID',
+        status: 'FAIL',
+      });
 
       for (const [result, signed] of [
         [anonymousResult, false],
@@ -249,7 +280,9 @@ describe('unicity-timestamp (offline)', () => {
       expect(mismatch.code).toBe(1);
       expect(mismatch.stdout).toContain('Hash mismatch');
       expect(wrongNetwork.code).toBe(1);
-      expect(wrongNetwork.stdout).toContain('network 4 but the trust base is for network 1');
+      expect(wrongNetwork.stdout).toContain(
+        'The token is for network 4 and the trust base for network 1; select the matching network or trust base.',
+      );
       expect(tamperedResult.code).toBe(1);
       expect(inspected.code).toBe(0);
       expect(JSON.parse(inspected.stdout)).toMatchObject({ command: 'inspect', network: { id: 4 }, verified: false });

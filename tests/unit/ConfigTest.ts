@@ -298,6 +298,11 @@ describe('resolveStampConfig', () => {
     await expect(resolveStampConfig(TEST_DIGEST_HEX, { keyFile: '/nonexistent.key' }, env)).rejects.toThrow(
       /Cannot read key file/,
     );
+    const emptyKeyFile = path.join(await tempDir(), 'empty.key');
+    await writeFile(emptyKeyFile, '');
+    await expect(resolveStampConfig(TEST_DIGEST_HEX, { keyFile: emptyKeyFile }, env)).rejects.toThrow(
+      /Private key must be 64 hex characters/,
+    );
   });
 
   it('refuses plain HTTP for the API key unless --allow-insecure', async () => {

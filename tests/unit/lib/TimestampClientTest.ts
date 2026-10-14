@@ -13,8 +13,9 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
+import { StampError } from '../../../src/lib/errors.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
-import { describeToken, StampError, stampWith, verificationFailure, verify } from '../../../src/lib/TimestampClient.js';
+import { describeToken, stampWith, verificationFailure, verify } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST, TEST_DIGEST_HEX } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 
@@ -87,7 +88,7 @@ describe('TimestampClient', () => {
     const result = await verify(token, bundledTrustBase('mainnet'));
     expect(result.status).toEqual('FAIL');
     expect(result.reason).toEqual(
-      'Token is for network 3 but the trust base is for network 1; select the matching network or trust base.',
+      'Mint network does not match trust base. The token is for network 3 and the trust base for network 1; select the matching network or trust base.',
     );
   });
 

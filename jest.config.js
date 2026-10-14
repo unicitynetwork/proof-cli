@@ -9,9 +9,10 @@ try {
 }
 
 export default {
-  collectCoverage: Boolean(process.env.CI),
+  collectCoverage: process.env.CI === 'true',
   collectCoverageFrom: ['<rootDir>/src/**/*.ts'],
   extensionsToTreatAsEsm: ['.ts'],
+  setupFilesAfterEnv: ['<rootDir>/tests/support/cleanup.ts'],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },

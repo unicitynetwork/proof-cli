@@ -23,8 +23,6 @@ import { ITimestampNetwork } from './networks.js';
 import { decodePayload, TimestampPayload } from './TimestampPayload.js';
 import { createVerificationContext } from './verification.js';
 
-export { StampError } from './errors.js';
-
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const DEFAULT_POLL_INTERVAL_MS = 1_000;
 
@@ -71,7 +69,7 @@ export interface ITimestampDescription {
 export interface ITimestampVerificationResult extends ITimestampDescription {
   /** SDK result tree, or null when verification was not reached. */
   readonly details: VerificationResult<VerificationStatus> | null;
-  /** Null when no expected digest was given. */
+  /** Null when no expected digest was given or the comparison was not reached. */
   readonly expectedDigestMatches: boolean | null;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
@@ -254,36 +252,41 @@ export async function verify(
   if (details.status !== VerificationStatus.OK) {
     return verificationFailure(description, explainFailure(details, description, trustBase), details);
   }
-
-  const expectedDigestMatches =
-    options.expectedDigest === undefined || description.payload === null
-      ? null
-      : areUint8ArraysEqual(description.payload.digest, options.expectedDigest);
-  if (expectedDigestMatches === false) {
+  if (options.expectedDigest === undefined) {
+    return { ...description, details, expectedDigestMatches: null, reason: null, status: 'OK' };
+  }
+  // Not dead code, and not a pass: reachable only if `describeToken` and the
+  // issuance verifier disagree about the payload, which is exactly the case that
+  // must not report OK with the caller's comparison quietly skipped.
+  if (description.payload === null) {
+    return verificationFailure(
+      description,
+      `Cannot check the expected hash: the payload could not be read (${description.payloadError ?? 'no payload'}).`,
+      details,
+    );
+  }
+  if (!areUint8ArraysEqual(description.payload.digest, options.expectedDigest)) {
     return verificationFailure(description, 'Hash mismatch: the token certifies a different digest.', details, false);
   }
-
-  return { ...description, details, expectedDigestMatches, reason: null, status: 'OK' };
+  return { ...description, details, expectedDigestMatches: true, reason: null, status: 'OK' };
 }
 
 /**
- * Pick the message a user needs out of a failed verification. The two trust-base
- * mismatches are detected on typed fields rather than SDK rule names.
+ * Pick the message a user needs out of a failed verification: the deepest failing
+ * rule that carries one, followed by the trust-base network when it is not the token's.
  */
 function explainFailure(
   details: VerificationResult<VerificationStatus>,
   description: ITimestampDescription,
   trustBase: RootTrustBase,
 ): string {
-  if (description.networkId.id !== trustBase.networkId.id) {
-    return `Token is for network ${description.networkId.id} but the trust base is for network ${trustBase.networkId.id}; select the matching network or trust base.`;
-  }
-  if (description.epoch !== trustBase.epoch) {
-    return `Token was sealed in epoch ${description.epoch} but the trust base is for epoch ${trustBase.epoch}; use a trust base for that epoch.`;
-  }
   const failures = collectFailures(details);
-  const leaf = failures.find((result) => result.results.length === 0) ?? failures.at(-1) ?? details;
-  return leaf.message !== '' ? leaf.message : `Verification rule ${leaf.rule} failed.`;
+  const explained = failures.filter((result) => result.message !== '').at(-1) ?? failures.at(-1) ?? details;
+  const reason = explained.message !== '' ? explained.message : `Verification rule ${explained.rule} failed.`;
+  if (description.networkId.id !== trustBase.networkId.id) {
+    return `${reason} The token is for network ${description.networkId.id} and the trust base for network ${trustBase.networkId.id}; select the matching network or trust base.`;
+  }
+  return reason;
 }
 
 function collectFailures(result: VerificationResult<unknown>): VerificationResult<unknown>[] {

@@ -150,6 +150,25 @@ export async function hashFile(path: string): Promise<Uint8Array> {
 }
 
 /**
+ * Reject two sources for one digest.
+ *
+ * Separate from {@link resolveDigest} so a command can refuse the contradiction
+ * before it reads anything: `verify` returns early on a token whose network it
+ * cannot place, and a contradiction on the command line is a usage error either
+ * way.
+ *
+ * @param {string} [digest] Digest given directly.
+ * @param {string} [file] File to hash instead.
+ * @param {string} digestFlag How the digest option is named in the error.
+ * @throws {CliError} If both are given.
+ */
+export function assertOneDigestSource(digest?: string, file?: string, digestFlag = 'a digest'): void {
+  if (digest !== undefined && file !== undefined) {
+    throw usageError(`Pass either ${digestFlag} or --file, not both.`);
+  }
+}
+
+/**
  * Resolve a digest from at most one of a digest string and a file to hash.
  *
  * @param {string} [digest] Digest as hex.
@@ -163,9 +182,7 @@ export async function resolveDigest(
   file?: string,
   digestFlag = 'a digest',
 ): Promise<Uint8Array | undefined> {
-  if (digest !== undefined && file !== undefined) {
-    throw usageError(`Pass either ${digestFlag} or --file, not both.`);
-  }
+  assertOneDigestSource(digest, file, digestFlag);
   if (digest !== undefined) {
     return parseDigest(digest);
   }
@@ -260,6 +277,14 @@ export function parseTimeoutSeconds(value?: string): number {
   return seconds * 1000;
 }
 
+async function readKeyFile(file: string): Promise<string> {
+  try {
+    return await readFile(file, 'utf8');
+  } catch (error) {
+    throw usageError(`Cannot read key file ${file}.`, { cause: error });
+  }
+}
+
 async function resolveSigner(flags: IStampFlags, env: NodeJS.ProcessEnv): Promise<SigningService | undefined> {
   if (flags.anonymous && flags.sign) {
     throw usageError('--anonymous and --sign contradict each other.');
@@ -267,16 +292,10 @@ async function resolveSigner(flags: IStampFlags, env: NodeJS.ProcessEnv): Promis
   if (flags.anonymous) {
     return undefined;
   }
-  let keyHex: string | undefined;
   if (flags.keyFile !== undefined) {
-    try {
-      keyHex = await readFile(flags.keyFile, 'utf8');
-    } catch (error) {
-      throw usageError(`Cannot read key file ${flags.keyFile}.`, { cause: error });
-    }
-  } else {
-    keyHex = env.UNICITY_PRIVATE_KEY;
+    return new SigningService(parsePrivateKey(await readKeyFile(flags.keyFile)));
   }
+  const keyHex = env.UNICITY_PRIVATE_KEY;
   if (keyHex === undefined || keyHex.trim() === '') {
     if (flags.sign) {
       throw usageError('--sign requires a key: pass --key-file or set UNICITY_PRIVATE_KEY.');
