@@ -1,4 +1,4 @@
-# Unicity Timestamp CLI
+# Unicity Proof CLI
 
 Timestamping service on Unicity network. Tokens are standard Unicity tokens produced with the [state transition SDK](https://github.com/unicitynetwork/state-transition-sdk-js).
 
