@@ -10,23 +10,23 @@ Timestamping service on Unicity network. Tokens are standard Unicity tokens prod
 ## Installation
 
 ```bash
-npm install -g @unicitylabs/timestamp-cli
-unicity-timestamp --help
+npm install -g @unicitylabs/proof-cli
+unicity-proof --help
 ```
 
 Or run it without installing:
 
 ```bash
-npx @unicitylabs/timestamp-cli --help
+npx @unicitylabs/proof-cli --help
 ```
 
 To work from a checkout instead:
 
 ```bash
-git clone https://github.com/unicitynetwork/timestamp-cli.git
-cd timestamp-cli
+git clone https://github.com/unicitynetwork/proof-cli.git
+cd proof-cli
 npm install         # builds through the prepare script
-npm link            # optional: puts `unicity-timestamp` on your PATH
+npm link            # optional: puts `unicity-proof` on your PATH
 ```
 
 ## Configuration
@@ -59,12 +59,12 @@ as the table says.
 ### Stamp
 
 ```bash
-unicity-timestamp stamp <sha256-hex>              # hash supplied
-unicity-timestamp stamp --file <path>              # hash computed locally
-unicity-timestamp stamp --file document.pdf --out document.cbor
-unicity-timestamp stamp --file document.pdf --network testnet2
-unicity-timestamp stamp --file document.pdf --timeout 120
-unicity-timestamp stamp --file document.pdf --json > stamp.json
+unicity-proof stamp <sha256-hex>              # hash supplied
+unicity-proof stamp --file <path>              # hash computed locally
+unicity-proof stamp --file document.pdf --out document.cbor
+unicity-proof stamp --file document.pdf --network testnet2
+unicity-proof stamp --file document.pdf --timeout 120
+unicity-proof stamp --file document.pdf --json > stamp.json
 ```
 
 A stamp prints a summary and writes the token to `--out`, by default `token_<first 16 hex characters of the digest>.cbor` in the current directory. The token file is the receipt; keep it with the document.
@@ -96,8 +96,8 @@ that text recovers the stamp in full; there is no need to stamp again.
 By default a stamp proves only that the hash existed. To also prove that *you* stamped it, sign with a key:
 
 ```bash
-unicity-timestamp keygen --out my.key                 # once; mode 0600, 64 hex characters
-unicity-timestamp stamp --file document.pdf --key-file my.key
+unicity-proof keygen --out my.key                 # once; mode 0600, 64 hex characters
+unicity-proof stamp --file document.pdf --key-file my.key
 ```
 
 `keygen --out -` prints the private key to stdout instead of writing a file, as
@@ -115,10 +115,10 @@ The signer's compressed public key is printed on every `stamp` and `verify`, as 
 ### Verify
 
 ```bash
-unicity-timestamp verify document.cbor                      # is this a valid Unicity timestamp?
-unicity-timestamp verify document.cbor --file document.pdf  # ...and is it for this file?
-unicity-timestamp verify document.cbor --hash 2cf24dba…9824 # ...or for this digest?
-cat document.cbor | unicity-timestamp verify -              # from stdin; binary or hex
+unicity-proof verify document.cbor                      # is this a valid Unicity timestamp?
+unicity-proof verify document.cbor --file document.pdf  # ...and is it for this file?
+unicity-proof verify document.cbor --hash 2cf24dba…9824 # ...or for this digest?
+cat document.cbor | unicity-proof verify -              # from stdin; binary or hex
 ```
 
 ```
@@ -140,7 +140,7 @@ The `Trust base` line says which root of trust produced that verdict — `bundle
 ### Inspect
 
 ```bash
-unicity-timestamp inspect document.cbor
+unicity-proof inspect document.cbor
 ```
 
 Prints the same fields as `verify` without checking anything, under an `UNVERIFIED` banner. Useful for looking at tokens from other networks or other token types.
@@ -150,7 +150,7 @@ Prints the same fields as `verify` without checking anything, under an `UNVERIFI
 Every command accepts `--json` and prints one JSON object on stdout; everything else goes to stderr. Large integers are decimal strings. `referenceTimeIso` is null when the token carries a reference time no date can represent; `referenceTime` always holds the raw value.
 
 ```bash
-unicity-timestamp verify document.cbor --file document.pdf --json | jq -r .referenceTimeIso
+unicity-proof verify document.cbor --file document.pdf --json | jq -r .referenceTimeIso
 ```
 
 | Exit code | Meaning |
@@ -164,9 +164,9 @@ unicity-timestamp verify document.cbor --file document.pdf --json | jq -r .refer
 ### Testnet and custom gateways
 
 ```bash
-unicity-timestamp stamp --file document.pdf --network testnet2 --api-key sk_ddc3cfcc001e4a28ac3fad7407f99590
-unicity-timestamp stamp --file document.pdf --gateway https://gateway.example --trust-base ./bft-trustbase.json
-unicity-timestamp stamp --file document.pdf --gateway http://localhost:3000 --allow-insecure   # local aggregator only
+unicity-proof stamp --file document.pdf --network testnet2 --api-key sk_ddc3cfcc001e4a28ac3fad7407f99590
+unicity-proof stamp --file document.pdf --gateway https://gateway.example --trust-base ./bft-trustbase.json
+unicity-proof stamp --file document.pdf --gateway http://localhost:3000 --allow-insecure   # local aggregator only
 ```
 
 The testnet2 key above is the shared public demo key published in the [sphere-sdk README](https://github.com/unicity-sphere/sphere-sdk/blob/main/README.md#api-key), where it is documented as public rather than secret; capacity is shared, so get your own key for sustained use. Trust bases for mainnet and testnet2 ship inside the package. The CLI never downloads a trust base at run time.
