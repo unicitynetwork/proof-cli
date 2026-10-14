@@ -1,6 +1,6 @@
 {
   "name": "@unicitylabs/timestamp-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Timestamp a SHA-256 hash on the Unicity Network and verify the resulting token offline",
   "type": "module",
   "bin": {
