@@ -1,10 +1,10 @@
 {
-  "name": "@unicitylabs/timestamp-cli",
+  "name": "@unicitylabs/proof-cli",
   "version": "0.1.2",
-  "description": "Timestamp a SHA-256 hash on the Unicity Network and verify the resulting token offline",
+  "description": "Create and verify Unicity proofs: certify a SHA-256 hash on the Unicity Network and verify the token offline",
   "type": "module",
   "bin": {
-    "unicity-timestamp": "lib/cli.js"
+    "unicity-proof": "lib/cli.js"
   },
   "exports": {
     ".": {
@@ -33,22 +33,24 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/unicitynetwork/timestamp-cli.git"
+    "url": "git+https://github.com/unicitynetwork/proof-cli.git"
   },
   "keywords": [
     "unicity",
-    "timestamp",
+    "proof",
+    "attestation",
     "timestamping",
     "proof-of-existence",
+    "agent",
     "cli"
   ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
-  "homepage": "https://github.com/unicitynetwork/timestamp-cli#readme",
+  "homepage": "https://github.com/unicitynetwork/proof-cli#readme",
   "bugs": {
-    "url": "https://github.com/unicitynetwork/timestamp-cli/issues"
+    "url": "https://github.com/unicitynetwork/proof-cli/issues"
   },
   "engines": {
     "node": ">=22"

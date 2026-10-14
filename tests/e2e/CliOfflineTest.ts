@@ -7,11 +7,11 @@ import { tempDir, TEST_DIGEST_HEX } from '../support/fixtures.js';
 const TIMEOUT = 30_000;
 const INCLUSION_PROOF_BYTE_OFFSET = 700;
 
-describe('unicity-timestamp (offline)', () => {
+describe('unicity-proof (offline)', () => {
   let cwd: string;
 
   beforeAll(async () => {
-    cwd = await tempDir('timestamp-cli-e2e-');
+    cwd = await tempDir('proof-cli-e2e-');
   });
 
   it(
@@ -30,7 +30,17 @@ describe('unicity-timestamp (offline)', () => {
 
       // Read from the manifest rather than written out, so a release bump does
       // not have to remember to come back and edit this line.
-      const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as { version: string };
+      const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
+        bin: Record<string, string>;
+        version: string;
+      };
+
+      // The installed command name and the name the help prints have to agree, or
+      // the help tells the reader to run something that is not on their PATH, so
+      // the name is taken from the manifest that installs it rather than written
+      // out here. The whole usage line is asserted, so a stale name cannot hide.
+      expect(help.stdout.split('\n')[0]).toEqual(`Usage: ${Object.keys(manifest.bin)[0]} [options] [command]`);
+
       expect(version.code).toBe(0);
       expect(version.stdout.trim()).toEqual(manifest.version);
       expect(short.code).toBe(0);
@@ -41,6 +51,27 @@ describe('unicity-timestamp (offline)', () => {
       // as an alias. Asserted so the trade is visible if anyone reverses it.
       expect(oldShort.code).toBe(2);
       expect(oldShort.stderr).toContain("unknown option '-V'");
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'names the default key file in the keygen help',
+    async () => {
+      const keygenHelp = await runCli(['keygen', '--help'], { cwd });
+      expect(keygenHelp.code).toBe(0);
+      expect(keygenHelp.stdout).toContain('unicity-proof.key');
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'names the default key file after the command',
+    async () => {
+      const directory = await tempDir('proof-cli-default-key-');
+      const result = await runCli(['keygen'], { cwd: directory });
+      expect(result.code).toBe(0);
+      expect(await readdir(directory)).toEqual(['unicity-proof.key']);
     },
     TIMEOUT,
   );
@@ -79,7 +110,7 @@ describe('unicity-timestamp (offline)', () => {
     async () => {
       const envFile = path.join(cwd, 'custom.env');
       await writeFile(envFile, 'UNICITY_NETWORK=devnet\n');
-      const dotenvDir = await tempDir('timestamp-cli-dotenv-');
+      const dotenvDir = await tempDir('proof-cli-dotenv-');
       await writeFile(path.join(dotenvDir, '.env'), 'UNICITY_NETWORK=devnet\n');
       const args = [
         'stamp',
@@ -201,7 +232,7 @@ describe('unicity-timestamp (offline)', () => {
     async () => {
       // A token plus a .env naming the trust base that validates it would
       // otherwise be a complete forgery kit, and the verdict would not say so.
-      const directory = await tempDir('timestamp-cli-dotenv-');
+      const directory = await tempDir('proof-cli-dotenv-');
       const mainnetTrustBase = path.resolve('src/trust-bases/bft-trustbase.mainnet.json');
       const fixture = path.resolve('tests/fixtures/testnet2-anonymous.cbor');
       await writeFile(path.join(directory, '.env'), `UNICITY_TRUST_BASE=${mainnetTrustBase}\n`);

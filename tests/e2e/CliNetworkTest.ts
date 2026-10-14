@@ -14,7 +14,7 @@ const TIMEOUT = 180_000;
 const describeNetwork = TEST_API_KEY ? describe : describe.skip;
 const itWritesFixtures = process.env.UNICITY_E2E_WRITE_FIXTURES === '1' ? it : it.skip;
 
-describeNetwork(`unicity-timestamp against ${TEST_NETWORK}`, () => {
+describeNetwork(`unicity-proof against ${TEST_NETWORK}`, () => {
   let cwd: string;
   const env = { UNICITY_API_KEY: TEST_API_KEY ?? '', UNICITY_NETWORK: TEST_NETWORK };
   const digest = HexConverter.encode(crypto.getRandomValues(new Uint8Array(32)));
@@ -23,7 +23,7 @@ describeNetwork(`unicity-timestamp against ${TEST_NETWORK}`, () => {
   let signedToken: string;
 
   beforeAll(async () => {
-    cwd = await tempDir('timestamp-cli-net-');
+    cwd = await tempDir('proof-cli-net-');
     anonymousToken = path.join(cwd, 'anonymous.cbor');
     signedToken = path.join(cwd, 'signed.cbor');
   });

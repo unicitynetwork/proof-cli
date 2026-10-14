@@ -145,7 +145,7 @@ export function warningLine(message: string): string {
 export function recoveryLines(bytes: Uint8Array): string {
   return [
     'error: the stamp was certified but could not be written.',
-    'Save the token below; `unicity-timestamp verify` accepts hex text.',
+    'Save the token below; `unicity-proof verify` accepts hex text.',
     HexConverter.encode(bytes),
     '',
   ].join('\n');

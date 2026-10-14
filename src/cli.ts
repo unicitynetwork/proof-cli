@@ -23,8 +23,8 @@ process.once('SIGINT', () => {
 
 const program = new Command();
 program
-  .name('unicity-timestamp')
-  .description('Timestamp a SHA-256 hash on the Unicity Network and verify the resulting token offline.')
+  .name('unicity-proof')
+  .description('Certify a SHA-256 hash on the Unicity Network and verify the resulting proof offline.')
   // Commander defaults the version option to `-V`, keeping `-v` free for a
   // `--verbose` this CLI does not have. `node -v` and `npm -v` are what people
   // reach for, so the short flag is lowercase here. Commander refuses two short
@@ -100,7 +100,7 @@ program
 program
   .command('keygen')
   .description('generate a secp256k1 private key for signed stamps')
-  .option('--out <path>', 'key file; default unicity-timestamp.key; "-" prints the key to stdout')
+  .option('--out <path>', 'key file; default unicity-proof.key; "-" prints the key to stdout')
   .option('--force', 'overwrite the key file')
   .action(async (flags: IKeygenFlags) => {
     process.exitCode = await runKeygen(flags, context());

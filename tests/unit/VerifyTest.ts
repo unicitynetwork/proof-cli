@@ -21,7 +21,7 @@ describe('runVerify on a token whose network has no bundled pin', () => {
       pollIntervalMs: 10,
       timeoutMs: 2_000,
     });
-    file = path.join(await tempDir('timestamp-cli-verify-'), 'token.cbor');
+    file = path.join(await tempDir('proof-cli-verify-'), 'token.cbor');
     await writeFile(file, token.toCBOR());
   });
 

@@ -12,10 +12,14 @@ name: Release
 #     restriction rather than anything written in this file.
 #   * The package exists on the registry and names this workflow as its trusted
 #     publisher (npmjs.com > the package > Settings > Trusted Publisher;
-#     repository `unicitynetwork/timestamp-cli`, workflow `npm.yml`, environment
+#     repository `unicitynetwork/proof-cli`, workflow `npm.yml`, environment
 #     `npm-publish`). npm will not accept a trusted publisher for a package that
 #     has never been published, so the first release is published by hand and
 #     every release after it runs from here.
+#   * That configuration permits direct publishing under "Allowed actions".
+#     Configurations created after 3 September 2026 allow only
+#     `npm stage publish` by default, and the publish step below runs
+#     `npm publish`, so a default configuration refuses it.
 on:
   workflow_dispatch:
     inputs:
@@ -157,8 +161,8 @@ jobs:
       - name: Refuse a version that is already published
         run: |
           version='${{ steps.version.outputs.version }}'
-          if npm view "@unicitylabs/timestamp-cli@${version}" version >/dev/null 2>&1; then
-            echo "@unicitylabs/timestamp-cli@${version} is already on the registry." >&2
+          if npm view "@unicitylabs/proof-cli@${version}" version >/dev/null 2>&1; then
+            echo "@unicitylabs/proof-cli@${version} is already on the registry." >&2
             exit 1
           fi
 
@@ -192,5 +196,5 @@ jobs:
           fi
           gh release create "v${version}" \
             --title "v${version}" \
-            --notes "https://www.npmjs.com/package/@unicitylabs/timestamp-cli/v/${version}" \
+            --notes "https://www.npmjs.com/package/@unicitylabs/proof-cli/v/${version}" \
             --verify-tag $prerelease

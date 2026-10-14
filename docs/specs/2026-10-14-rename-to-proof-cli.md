@@ -84,7 +84,8 @@ Brand and user-visible surface:
 
 - `package.json`: `name`, `bin`, `description`, `keywords`, `repository`,
   `homepage`, `bugs`
-- `package-lock.json`: the package name at the root and in the `""` package entry
+- `package-lock.json`: the package name at the root and in the `""` package
+  entry, and the `bin` map inside that entry, which mirrors the manifest
 - `src/cli.ts`: `.name()`, `.description()` — the sentence `--help` prints — and
   the `--out` help text naming the default key file
 - `src/output.ts`: the recovery hint printed when a certified stamp cannot be
@@ -109,60 +110,69 @@ frozen; `proof` means the product and is free to change.
 
 ## Migration
 
-The package rename and the repository rename are separable. The package rename
-needs no organisation admin and carries no redirect risk; the repository rename
-needs both. The new package needs its own trusted publisher either way — only
-its repository value differs — so neither rename avoids that step.
+**The repository rename comes first.** npm requires a package's `repository` to
+match, case-sensitively, the repository it publishes from, so a manifest
+naming `unicitynetwork/proof-cli` cannot publish from a repository still named
+`timestamp-cli`. The two renames remain separable in principle — a
+package rename alone needs no organisation admin, and would keep the old
+repository URLs in the manifest — but when both are being done, this is the
+order that works.
 
-### Package rename
-
-npm's trusted publishing cannot create a package name the publisher does not
-already own, so one publish has to happen by hand. That publish is a
-prerelease whose only purpose is to make the name exist, which keeps the real
-0.2.0 on the audited path.
-
-1. Land the rename. The release workflow owns versions, so the rename commit
-   carries no bump and stays at 0.1.2.
-2. Bootstrap the name by hand: `npm version 0.2.0-rc1 --no-git-tag-version`,
+1. Rename the repository on GitHub to `proof-cli`. Requires organisation admin.
+   Update the remote in any working copy.
+2. Land the rename: code, docs and workflow strings, reviewed as one change.
+   The version stays 0.1.2; the release workflow owns the bump.
+3. Bootstrap the package name by hand: `npm version 0.2.0-rc1 --no-git-tag-version`,
    which regenerates `src/version.ts` through the `version` lifecycle script and
    keeps `VersionTest` green, then `npm publish --access public --tag next`.
-   Discard the local bump afterwards.
+   Discard the local bump afterwards. npm's trusted publishing cannot create a
+   package name the publisher does not already own, so this one publish cannot
+   come from CI.
 
    **`--tag next` is required.** npm points `latest` at whatever it publishes,
    prerelease or not, so without it a plain `npm install @unicitylabs/proof-cli`
    would hand everyone a release candidate. The workflow derives the same tag
    from the version itself; this publish is the one that does not go through it.
 
-3. Configure the new package's trusted publisher: the repository as it is named
-   at the time, workflow `npm.yml`, environment `npm-publish`.
-4. Run the release workflow with `0.2.0` as the explicit version input. It
-   bumps, builds, tests, publishes to `latest`, pushes the bump with its tag and
-   creates the release.
-5. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
+4. Configure the new package's trusted publisher: repository
+   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`,
+   and under "Allowed actions" **permit direct publishing with `npm publish`**.
+   Configurations created after 3 September 2026 allow only `npm stage publish`
+   by default, and this workflow publishes directly, so a configuration left on
+   the default refuses the release — which would also spend the two-day window
+   in step 5 on a publish that cannot succeed.
+5. Run the release workflow with `0.2.0` as the explicit version input, **within
+   two days of step 4**. A new trusted-publisher configuration must complete its
+   first successful publish inside that window; afterwards it expires and can no
+   longer be used or edited, and has to be recreated. Do not configure the
+   publisher until the release is ready to go out.
+6. `npm deprecate @unicitylabs/timestamp-cli "Renamed to @unicitylabs/proof-cli"`.
    The old versions stay installable. Unpublishing would break existing
    lockfiles.
-6. Optionally `npm dist-tag rm @unicitylabs/proof-cli next` once 0.2.0 is on
+7. Optionally `npm dist-tag rm @unicitylabs/proof-cli next` once 0.2.0 is on
    `latest`.
+8. Optionally restrict token publishing on the new package — npm Settings,
+   Publishing access, "Require two-factor authentication and disallow tokens".
+   Configuring a trusted publisher does not do this by itself, so the bootstrap
+   credential from step 3 keeps working until it is done.
+
+Step 4's configuration binds to the repository's immutable identity, not its
+name, once step 5 succeeds. npm does not document what a later rename requires
+of that binding; under this ordering the repository is not renamed again
+afterwards, so the question is moot.
 
 Publishing 0.2.0 from the workflow rather than by hand is what earns it a
-provenance attestation: 0.1.2, released through the workflow, carries an SLSA
-predicate, and 0.1.0, published by hand to bootstrap the current name, carries
-none. Under this order the unattested artifact is a release candidate on a tag
-nothing resolves by default.
+provenance attestation: 0.1.1 and 0.1.2, released through the workflow, carry an
+SLSA predicate, and 0.1.0, published by hand to bootstrap the current name,
+carries none. Under this order the unattested artifact is a release candidate on
+a tag nothing resolves by default.
 
-### Repository rename
-
-7. Rename the repository on GitHub. Requires organisation admin. Update the
-   remote in any working copy.
-8. Re-point the new package's trusted publisher at the new repository name, if
-   step 3 ran before the rename.
+Steps 1, 3, 4, 6, 7 and 8 need registry or organisation credentials.
 
 GitHub redirects the old paths only until a repository with the old name is
 created in the organisation, so the redirect is not a permanent guarantee. Every
 published 0.1.x tarball carries `repository`, `homepage` and `bugs` URLs naming
 the old repository for as long as anyone installs those versions.
-
-Steps 2, 3, 5, 6, 7 and 8 need registry or organisation credentials.
 
 ## Verification
 
@@ -204,12 +214,15 @@ from the user's side.
 
 ## Risks
 
-| Risk                                                     | Mitigation                                                                                                                          |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| The frozen tag is renamed later for consistency          | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                      |
-| The README appendix is caught by a file-wide replace     | Both sections named as frozen above; review the README diff line by line                                                            |
-| `latest` ends up on a release candidate                  | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version |
-| Releases break after the repository rename               | Step 8                                                                                                                              |
-| Users on the old package never learn of the move         | Step 5's deprecation message appears on install                                                                                     |
-| 0.2.0 ships without a provenance attestation             | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                   |
-| The old repository name is recreated, breaking redirects | Do not create a repository named `timestamp-cli` in the organisation                                                                |
+| Risk                                                                                                                  | Mitigation                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The frozen tag is renamed later for consistency                                                                       | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                                   |
+| The README appendix is caught by a file-wide replace                                                                  | Both sections named as frozen above; review the README diff line by line                                                                         |
+| `latest` ends up on a release candidate                                                                               | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version              |
+| A provenance publish is attempted from the old repository name                                                        | The repository rename is step 1, before any publish                                                                                              |
+| Users on the old package never learn of the move                                                                      | Step 6's deprecation message appears on install                                                                                                  |
+| 0.2.0 ships without a provenance attestation                                                                          | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                                |
+| The old repository name is recreated, breaking redirects                                                              | Do not create a repository named `timestamp-cli` in the organisation                                                                             |
+| The trusted publisher allows only staged publishing                                                                   | Step 4 permits direct `npm publish`; the default for configurations created after 3 September 2026 does not, and the workflow publishes directly |
+| The trusted-publisher configuration expires unused                                                                    | Step 4 happens only when the release is ready, and step 5 follows within two days                                                                |
+| The README's install command 404s between the merge and the bootstrap publish, because the package does not exist yet | Run the bootstrap publish immediately after merging                                                                                              |

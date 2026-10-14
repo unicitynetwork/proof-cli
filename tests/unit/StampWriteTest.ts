@@ -15,7 +15,7 @@ describe('writeCertifiedToken', () => {
   let directory: string;
 
   beforeEach(async () => {
-    directory = await tempDir('timestamp-cli-write-');
+    directory = await tempDir('proof-cli-write-');
   });
 
   it('writes the token and nothing else', async () => {
@@ -38,6 +38,9 @@ describe('writeCertifiedToken', () => {
     // from stderr, and no partial file is left lying around.
     expect(await readFile(out, 'utf8')).toEqual('existing');
     expect(sink.stderr()).toContain('could not be written');
+    // The hint is the only instruction a user gets for recovering a stamp they
+    // have already paid for, so it has to name a command that exists.
+    expect(sink.stderr()).toContain('`unicity-proof verify` accepts hex text');
     expect(sink.stderr()).toContain(HexConverter.encode(TOKEN));
     expect(await readdir(directory)).toEqual(['token.cbor']);
   });
