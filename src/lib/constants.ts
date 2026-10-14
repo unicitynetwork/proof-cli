@@ -8,6 +8,11 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
  * reason is its UTF-8 bytes, and it is the domain tag of the payload signature.
  * It carries no version on purpose: the payload has its own version field, so
  * this identifier stays stable while the payload format evolves.
+ *
+ * It is also not the product name, and must never be changed to match it.
+ * Renaming it gives every later stamp a different token type, recipient and
+ * signature domain, and nothing already certified would verify. The CLI is
+ * `unicity-proof`; the format is `unicity-timestamp` and stays so.
  */
 export const TIMESTAMP_TAG = 'unicity-timestamp';
 
