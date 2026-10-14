@@ -1,7 +1,7 @@
 # Rename to @unicitylabs/proof-cli
 
 Date: 2026-10-14
-Status: proposed
+Status: approved
 
 ## Why
 
