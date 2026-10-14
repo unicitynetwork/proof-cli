@@ -516,7 +516,10 @@ repository still named `timestamp-cli` with those URLs in the manifest fails.
    **`--tag next` is required** — npm points `latest` at whatever it publishes,
    prerelease or not.
 4. Configure the new package's trusted publisher: repository
-   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`.
+   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`,
+   and under "Allowed actions" permit direct publishing with `npm publish`.
+   Configurations created after 3 September 2026 default to `npm stage publish`
+   only, and this workflow publishes directly.
 5. Run the release workflow with `0.2.0` as the explicit version input.
    **Within two days of step 4.** A new trusted-publisher configuration has to
    complete its first successful publish inside that window; after it, the

@@ -135,7 +135,12 @@ order that works.
    from the version itself; this publish is the one that does not go through it.
 
 4. Configure the new package's trusted publisher: repository
-   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`.
+   `unicitynetwork/proof-cli`, workflow `npm.yml`, environment `npm-publish`,
+   and under "Allowed actions" **permit direct publishing with `npm publish`**.
+   Configurations created after 3 September 2026 allow only `npm stage publish`
+   by default, and this workflow publishes directly, so a configuration left on
+   the default refuses the release — which would also spend the two-day window
+   in step 5 on a publish that cannot succeed.
 5. Run the release workflow with `0.2.0` as the explicit version input, **within
    two days of step 4**. A new trusted-publisher configuration must complete its
    first successful publish inside that window; afterwards it expires and can no
@@ -209,14 +214,15 @@ from the user's side.
 
 ## Risks
 
-| Risk                                                                                                                  | Mitigation                                                                                                                          |
-| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| The frozen tag is renamed later for consistency                                                                       | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                      |
-| The README appendix is caught by a file-wide replace                                                                  | Both sections named as frozen above; review the README diff line by line                                                            |
-| `latest` ends up on a release candidate                                                                               | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version |
-| A provenance publish is attempted from the old repository name                                                        | The repository rename is step 1, before any publish                                                                                 |
-| Users on the old package never learn of the move                                                                      | Step 6's deprecation message appears on install                                                                                     |
-| 0.2.0 ships without a provenance attestation                                                                          | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                   |
-| The old repository name is recreated, breaking redirects                                                              | Do not create a repository named `timestamp-cli` in the organisation                                                                |
-| The trusted-publisher configuration expires unused                                                                    | Step 4 happens only when the release is ready, and step 5 follows within two days                                                   |
-| The README's install command 404s between the merge and the bootstrap publish, because the package does not exist yet | Run the bootstrap publish immediately after merging                                                                                 |
+| Risk                                                                                                                  | Mitigation                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The frozen tag is renamed later for consistency                                                                       | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                                   |
+| The README appendix is caught by a file-wide replace                                                                  | Both sections named as frozen above; review the README diff line by line                                                                         |
+| `latest` ends up on a release candidate                                                                               | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version              |
+| A provenance publish is attempted from the old repository name                                                        | The repository rename is step 1, before any publish                                                                                              |
+| Users on the old package never learn of the move                                                                      | Step 6's deprecation message appears on install                                                                                                  |
+| 0.2.0 ships without a provenance attestation                                                                          | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                                |
+| The old repository name is recreated, breaking redirects                                                              | Do not create a repository named `timestamp-cli` in the organisation                                                                             |
+| The trusted publisher allows only staged publishing                                                                   | Step 4 permits direct `npm publish`; the default for configurations created after 3 September 2026 does not, and the workflow publishes directly |
+| The trusted-publisher configuration expires unused                                                                    | Step 4 happens only when the release is ready, and step 5 follows within two days                                                                |
+| The README's install command 404s between the merge and the bootstrap publish, because the package does not exist yet | Run the bootstrap publish immediately after merging                                                                                              |
