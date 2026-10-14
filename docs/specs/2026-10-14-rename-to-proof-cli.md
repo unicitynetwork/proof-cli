@@ -111,9 +111,9 @@ frozen; `proof` means the product and is free to change.
 ## Migration
 
 **The repository rename comes first.** npm requires a package's `repository` to
-match, case-sensitively, the repository it is publishing with provenance from,
-so a manifest naming `unicitynetwork/proof-cli` cannot publish from a repository
-still named `timestamp-cli`. The two renames remain separable in principle — a
+match, case-sensitively, the repository it publishes from, so a manifest
+naming `unicitynetwork/proof-cli` cannot publish from a repository still named
+`timestamp-cli`. The two renames remain separable in principle — a
 package rename alone needs no organisation admin, and would keep the old
 repository URLs in the manifest — but when both are being done, this is the
 order that works.
@@ -151,9 +151,10 @@ order that works.
    Configuring a trusted publisher does not do this by itself, so the bootstrap
    credential from step 3 keeps working until it is done.
 
-Step 4's configuration binds to the repository's immutable identity once step 5
-succeeds, and that identity survives a rename, so the binding only needs
-re-pointing if the repository is renamed again afterwards.
+Step 4's configuration binds to the repository's immutable identity, not its
+name, once step 5 succeeds. npm does not document what a later rename requires
+of that binding; under this ordering the repository is not renamed again
+afterwards, so the question is moot.
 
 Publishing 0.2.0 from the workflow rather than by hand is what earns it a
 provenance attestation: 0.1.1 and 0.1.2, released through the workflow, carry an
@@ -208,13 +209,14 @@ from the user's side.
 
 ## Risks
 
-| Risk                                                           | Mitigation                                                                                                                          |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| The frozen tag is renamed later for consistency                | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                      |
-| The README appendix is caught by a file-wide replace           | Both sections named as frozen above; review the README diff line by line                                                            |
-| `latest` ends up on a release candidate                        | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version |
-| A provenance publish is attempted from the old repository name | The repository rename is step 1, before any publish                                                                                 |
-| Users on the old package never learn of the move               | Step 6's deprecation message appears on install                                                                                     |
-| 0.2.0 ships without a provenance attestation                   | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                   |
-| The old repository name is recreated, breaking redirects       | Do not create a repository named `timestamp-cli` in the organisation                                                                |
-| The trusted-publisher configuration expires unused             | Step 4 happens only when the release is ready, and step 5 follows within two days                                                   |
+| Risk                                                                                                                  | Mitigation                                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| The frozen tag is renamed later for consistency                                                                       | A sentence at the constant, the frozen-section list above, and `ConstantsTest`                                                      |
+| The README appendix is caught by a file-wide replace                                                                  | Both sections named as frozen above; review the README diff line by line                                                            |
+| `latest` ends up on a release candidate                                                                               | The bootstrap publish passes `--tag next`; 0.2.0 reaches `latest` only through the workflow, which derives the tag from the version |
+| A provenance publish is attempted from the old repository name                                                        | The repository rename is step 1, before any publish                                                                                 |
+| Users on the old package never learn of the move                                                                      | Step 6's deprecation message appears on install                                                                                     |
+| 0.2.0 ships without a provenance attestation                                                                          | Only the bootstrap prerelease is published by hand; 0.2.0 comes from the workflow                                                   |
+| The old repository name is recreated, breaking redirects                                                              | Do not create a repository named `timestamp-cli` in the organisation                                                                |
+| The trusted-publisher configuration expires unused                                                                    | Step 4 happens only when the release is ready, and step 5 follows within two days                                                   |
+| The README's install command 404s between the merge and the bootstrap publish, because the package does not exist yet | Run the bootstrap publish immediately after merging                                                                                 |

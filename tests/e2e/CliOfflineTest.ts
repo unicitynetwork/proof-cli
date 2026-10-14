@@ -28,16 +28,19 @@ describe('unicity-proof (offline)', () => {
       expect(help.stdout).toContain('verify');
       expect(help.stdout).toContain('-v, --version');
 
-      // The installed command name and the name the help prints have to agree, or
-      // the help tells the reader to run something that is not on their PATH. The
-      // whole usage line is asserted rather than a substring, so a stale name cannot
-      // hide in it — and the old name is deliberately absent from this file, because
-      // Task 4 and Task 5 grep the tree for it.
-      expect(help.stdout.split('\n')[0]).toEqual('Usage: unicity-proof [options] [command]');
-
       // Read from the manifest rather than written out, so a release bump does
       // not have to remember to come back and edit this line.
-      const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as { version: string };
+      const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
+        bin: Record<string, string>;
+        version: string;
+      };
+
+      // The installed command name and the name the help prints have to agree, or
+      // the help tells the reader to run something that is not on their PATH, so
+      // the name is taken from the manifest that installs it rather than written
+      // out here. The whole usage line is asserted, so a stale name cannot hide.
+      expect(help.stdout.split('\n')[0]).toEqual(`Usage: ${Object.keys(manifest.bin)[0]} [options] [command]`);
+
       expect(version.code).toBe(0);
       expect(version.stdout.trim()).toEqual(manifest.version);
       expect(short.code).toBe(0);

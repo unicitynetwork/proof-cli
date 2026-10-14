@@ -180,7 +180,7 @@ expect(sink.stderr()).toContain('`unicity-proof verify` accepts hex text');
 - [ ] **Step 4: Run the three tests to verify they fail**
 
 Run: `npm run build && npx jest tests/e2e/CliOfflineTest.ts -t 'prints help and version'`
-Expected: FAIL — `Expected substring: "unicity-proof"`
+Expected: FAIL — equality mismatch: received `Usage: unicity-timestamp [options] [command]`
 
 Run: `npx jest tests/e2e/CliOfflineTest.ts -t 'names the default key file'`
 Expected: FAIL — received `["unicity-timestamp.key"]`
@@ -375,7 +375,7 @@ rather than loosening this check.
 - [ ] **Step 5: Run the suite and lint**
 
 Run: `npm run lint && CI= npm test`
-Expected: PASS, same test count as before the rename plus the one new keygen test.
+Expected: PASS, same test count as before the rename plus the two new keygen tests.
 
 - [ ] **Step 6: Commit**
 
@@ -499,14 +499,14 @@ gh pr create --title "Rename the CLI to @unicitylabs/proof-cli" --body-file ../p
 
 ---
 
-## Operator steps after merge
+## Operator steps
 
-These need registry or organisation credentials and are not part of the code
-change. **The repository rename comes first**, because this branch points
-`repository`, `homepage` and `bugs` at `unicitynetwork/proof-cli`, and npm
-requires a package's `repository` to match, case-sensitively, the repository it
-is publishing with provenance from. Publishing from a repository still named
-`timestamp-cli` with those URLs in the manifest fails.
+Most of these need registry or organisation credentials; none is part of the
+code change. Step 2 is the merge of this branch. **The repository rename comes
+first**, because this branch points `repository`, `homepage` and `bugs` at
+`unicitynetwork/proof-cli`, and npm requires a package's `repository` to
+match, case-sensitively, the repository it publishes from. Publishing from a
+repository still named `timestamp-cli` with those URLs in the manifest fails.
 
 1. Rename the repository on GitHub to `proof-cli`. Organisation admin. Update
    the remote in any working copy.
@@ -529,6 +529,6 @@ is publishing with provenance from. Publishing from a repository still named
    Configuring a trusted publisher does not do this on its own, and the
    bootstrap token from step 3 keeps working until it is done.
 
-Step 4's binding is to the repository's immutable identity, which survives a
-later rename, so re-pointing it is only needed if the repository is renamed
-again after the binding is made.
+Step 4's binding is to the repository's immutable identity, not its name. npm
+does not document what a later rename requires of it; under this ordering the
+repository is not renamed again afterwards, so the question is moot.
