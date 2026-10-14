@@ -14,7 +14,7 @@ export interface IKeygenFlags {
   readonly out?: string;
 }
 
-const DEFAULT_KEY_FILE = 'unicity-timestamp.key';
+const DEFAULT_KEY_FILE = 'unicity-proof.key';
 
 /**
  * Write a private key to a path that already holds a file.

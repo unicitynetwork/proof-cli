@@ -28,6 +28,13 @@ describe('unicity-timestamp (offline)', () => {
       expect(help.stdout).toContain('verify');
       expect(help.stdout).toContain('-v, --version');
 
+      // The installed command name and the name the help prints have to agree, or
+      // the help tells the reader to run something that is not on their PATH. The
+      // whole usage line is asserted rather than a substring, so a stale name cannot
+      // hide in it — and the old name is deliberately absent from this file, because
+      // Task 4 and Task 5 grep the tree for it.
+      expect(help.stdout.split('\n')[0]).toEqual('Usage: unicity-proof [options] [command]');
+
       // Read from the manifest rather than written out, so a release bump does
       // not have to remember to come back and edit this line.
       const manifest = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as { version: string };
@@ -41,6 +48,27 @@ describe('unicity-timestamp (offline)', () => {
       // as an alias. Asserted so the trade is visible if anyone reverses it.
       expect(oldShort.code).toBe(2);
       expect(oldShort.stderr).toContain("unknown option '-V'");
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'names the default key file in the keygen help',
+    async () => {
+      const keygenHelp = await runCli(['keygen', '--help'], { cwd });
+      expect(keygenHelp.code).toBe(0);
+      expect(keygenHelp.stdout).toContain('unicity-proof.key');
+    },
+    TIMEOUT,
+  );
+
+  it(
+    'names the default key file after the command',
+    async () => {
+      const directory = await tempDir('proof-cli-default-key-');
+      const result = await runCli(['keygen'], { cwd: directory });
+      expect(result.code).toBe(0);
+      expect(await readdir(directory)).toEqual(['unicity-proof.key']);
     },
     TIMEOUT,
   );
