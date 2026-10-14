@@ -27,7 +27,7 @@
 **Files:**
 
 - Modify: `package.json` (name, bin, description, keywords, repository, homepage, bugs)
-- Modify: `package-lock.json` (name at the root and in the `""` package entry)
+- Modify: `package-lock.json` (name at the root and in the `""` package entry, and the `bin` map inside that entry)
 - Modify: `src/lib/constants.ts:6-12` (the comment on `TIMESTAMP_TAG`)
 
 **Interfaces:**

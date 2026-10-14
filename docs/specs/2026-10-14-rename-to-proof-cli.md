@@ -84,7 +84,8 @@ Brand and user-visible surface:
 
 - `package.json`: `name`, `bin`, `description`, `keywords`, `repository`,
   `homepage`, `bugs`
-- `package-lock.json`: the package name at the root and in the `""` package entry
+- `package-lock.json`: the package name at the root and in the `""` package
+  entry, and the `bin` map inside that entry, which mirrors the manifest
 - `src/cli.ts`: `.name()`, `.description()` — the sentence `--help` prints — and
   the `--out` help text naming the default key file
 - `src/output.ts`: the recovery hint printed when a certified stamp cannot be
