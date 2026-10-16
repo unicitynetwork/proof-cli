@@ -169,7 +169,7 @@ timeout does and does not mean, and why a verdict depends on its trust base.
 Copy it where your agent looks for skills, for example:
 
 ```bash
-mkdir -p .claude/skills
+mkdir -p .claude/skills/unicity-proof
 cp "$(npm root -g)/@unicitylabs/proof-cli/skills/unicity-proof/SKILL.md" .claude/skills/unicity-proof/
 ```
 
