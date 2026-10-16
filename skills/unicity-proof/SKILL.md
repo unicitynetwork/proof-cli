@@ -32,9 +32,13 @@ The token file **is** the receipt. Default name is
 `token_<first 16 hex of the digest>.cbor`; keep it with the document, because
 without it the proof is gone.
 
-- **Exit 3 does not mean nothing happened.** The timeout fired and nothing was
-  written locally, but the network may still have certified the request.
-  Re-running `stamp` spends quota again.
+- **Exit 3 covers several failures and only one is ambiguous.** A timeout
+  waiting for the inclusion proof is the only case that can leave the request
+  certified while nothing was written locally; there, re-running spends quota
+  again. `Could not reach the gateway`, `Gateway returned HTTP ...`,
+  `Gateway rate limit reached`, `Gateway refused the API key` and
+  `Aggregator rejected the certification request` all certified nothing — fix
+  the cause rather than retrying blind. The stderr message says which happened.
 - **A failed write after certification is recoverable.** The token is printed to
   stderr as hex, and both `verify` and `inspect` accept hex, so save that text.
   Do not re-stamp.
