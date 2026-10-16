@@ -161,6 +161,22 @@ unicity-proof verify document.cbor --file document.pdf --json | jq -r .reference
 | 3 | Network error, aggregator rejection, or timeout. |
 | 130 | Interrupted. |
 
+### Agents
+
+An agent skill ships in the package at `skills/unicity-proof/SKILL.md`. It is a
+short briefing on the traps that matter — binding a proof to a document, what a
+timeout does and does not mean, and why a verdict depends on its trust base.
+Copy it where your agent looks for skills, for example:
+
+```bash
+mkdir -p .claude/skills
+cp "$(npm root -g)/@unicitylabs/proof-cli/skills/unicity-proof/SKILL.md" .claude/skills/unicity-proof/
+```
+
+There is no MCP server, and none is planned while the CLI is the better
+interface: a tool schema costs thousands of context tokens before any work
+happens, where the skill costs a few hundred and is read only when relevant.
+
 ### Testnet and custom gateways
 
 ```bash
