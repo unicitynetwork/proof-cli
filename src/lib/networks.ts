@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises';
-
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 
 import mainnetTrustBase from '../trust-bases/bft-trustbase.mainnet.json' with { type: 'json' };
@@ -37,13 +35,20 @@ export interface ITimestampNetwork {
   readonly trustBase: RootTrustBase;
 }
 
-export interface INetworkSelection {
+/**
+ * Overrides for {@link resolveNetwork}.
+ *
+ * A replacement trust base arrives already parsed. This module reads no files, so
+ * the verification path can run where there is no filesystem; turning a
+ * `--trust-base` path into a trust base is the CLI's job.
+ */
+export interface INetworkOverrides {
   /** Overrides the preset gateway. */
   readonly gatewayUrl?: string;
   /** Defaults to mainnet. */
   readonly network?: NetworkName;
-  /** Path to a trust base JSON file that replaces the bundled one. */
-  readonly trustBasePath?: string;
+  /** Replaces the bundled trust base. */
+  readonly trustBase?: RootTrustBase;
 }
 
 /**
@@ -85,27 +90,16 @@ export function bundledTrustBase(name: NetworkName): RootTrustBase {
 }
 
 /**
- * Read and parse a trust base file.
- *
- * @param {string} path File path.
- * @returns {Promise<RootTrustBase>} Parsed trust base.
- * @throws {Error} If the file cannot be read or is not a trust base.
- */
-export async function loadTrustBase(path: string): Promise<RootTrustBase> {
-  return RootTrustBase.fromJSON(JSON.parse(await readFile(path, 'utf8')));
-}
-
-/**
  * Resolve gateway and trust base from a preset plus optional overrides.
  *
- * @param {INetworkSelection} selection Preset and overrides.
- * @returns {Promise<ITimestampNetwork>} Resolved network.
+ * @param {INetworkOverrides} overrides Gateway, preset and trust base overrides.
+ * @returns {ITimestampNetwork} Resolved network.
  */
-export async function resolveNetwork(selection: INetworkSelection = {}): Promise<ITimestampNetwork> {
-  const name = selection.network ?? 'mainnet';
+export function resolveNetwork(overrides: INetworkOverrides = {}): ITimestampNetwork {
+  const name = overrides.network ?? 'mainnet';
   return {
-    gatewayUrl: selection.gatewayUrl ?? NETWORKS[name].gatewayUrl,
+    gatewayUrl: overrides.gatewayUrl ?? NETWORKS[name].gatewayUrl,
     preset: name,
-    trustBase: selection.trustBasePath ? await loadTrustBase(selection.trustBasePath) : bundledTrustBase(name),
+    trustBase: overrides.trustBase ?? bundledTrustBase(name),
   };
 }

@@ -4,7 +4,8 @@ import path from 'node:path';
 import { ICommandContext } from './context.js';
 import { IStampFlags, resolveStampConfig } from '../config.js';
 import { EXIT_OK } from '../errors.js';
-import { describeToken, stamp } from '../lib/TimestampClient.js';
+import { stamp } from '../lib/TimestampClient.js';
+import { describeToken } from '../lib/TimestampVerification.js';
 import { recoveryLines, stampJson, stampText, toJsonLine, warningLine } from '../output.js';
 
 /**

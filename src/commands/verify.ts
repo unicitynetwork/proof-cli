@@ -3,7 +3,12 @@ import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
 import { assertOneDigestSource, INetworkFlags, resolveDigest, resolveTrustBaseOverride } from '../config.js';
 import { EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
 import { bundledTrustBase, ITrustBaseChoice, networkNameForId, TrustBaseSource } from '../lib/networks.js';
-import { describeToken, ITimestampVerificationResult, verificationFailure, verify } from '../lib/TimestampClient.js';
+import {
+  describeToken,
+  ITimestampVerificationResult,
+  verificationFailure,
+  verify,
+} from '../lib/TimestampVerification.js';
 import { toJsonLine, verifyJson, verifyText } from '../output.js';
 
 export interface IVerifyFlags extends INetworkFlags {

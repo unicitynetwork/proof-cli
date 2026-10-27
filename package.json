@@ -8,8 +8,12 @@
   },
   "exports": {
     ".": {
-      "types": "./lib/lib/index.d.ts",
-      "default": "./lib/lib/index.js"
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./verify": {
+      "types": "./lib/verify.d.ts",
+      "default": "./lib/verify.js"
     }
   },
   "files": [
@@ -19,7 +23,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('lib', { force: true, recursive: true })\" && tsc --project tsconfig.build.json",
     "build:check": "tsc --noEmit",
     "lint": "eslint \"src/**/*\" \"tests/**/*\"",
     "lint:fix": "eslint \"src/**/*\" \"tests/**/*\" --fix",

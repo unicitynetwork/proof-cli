@@ -4,17 +4,16 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
+import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
 import { usageError } from './errors.js';
 import {
   bundledTrustBase,
-  INetworkSelection,
   isNetworkName,
   ITimestampNetwork,
   ITrustBaseChoice,
-  loadTrustBase,
   NETWORK_NAMES,
   NetworkName,
   resolveNetwork,
@@ -32,6 +31,20 @@ export interface INetworkFlags {
   readonly gateway?: string;
   readonly network?: string;
   readonly trustBase?: string;
+}
+
+/**
+ * A network choice as the command line expresses it, with the trust base still a
+ * path. The library takes a parsed trust base instead, so {@link loadTrustBase}
+ * sits between this and {@link resolveNetwork}.
+ */
+export interface INetworkSelection {
+  /** Overrides the preset gateway. */
+  readonly gatewayUrl?: string;
+  /** Defaults to mainnet. */
+  readonly network?: NetworkName;
+  /** Path to a trust base JSON file that replaces the bundled one. */
+  readonly trustBasePath?: string;
 }
 
 export interface IStampFlags extends INetworkFlags {
@@ -187,6 +200,21 @@ export async function resolveDigest(
     return parseDigest(digest);
   }
   return file === undefined ? undefined : await hashFile(file);
+}
+
+/**
+ * Read and parse a trust base file.
+ *
+ * The library reads no files, so this lives here: a `--trust-base` path is a
+ * command-line concept, and keeping the read in the CLI leaves the verification
+ * path able to run where there is no filesystem.
+ *
+ * @param {string} file Path to a trust base JSON file.
+ * @returns {Promise<RootTrustBase>} Parsed trust base.
+ * @throws {Error} If the file cannot be read or is not a trust base.
+ */
+export async function loadTrustBase(file: string): Promise<RootTrustBase> {
+  return RootTrustBase.fromJSON(JSON.parse(await readFile(file, 'utf8')));
 }
 
 /**
@@ -384,7 +412,12 @@ export async function resolveStampConfig(
     throw usageError('No API key. Set UNICITY_API_KEY in the environment or .env, or pass --api-key.');
   }
 
-  const network = await resolveNetwork(resolveNetworkSelection(flags, env));
+  const selection = resolveNetworkSelection(flags, env);
+  const network = resolveNetwork({
+    gatewayUrl: selection.gatewayUrl,
+    network: selection.network,
+    trustBase: selection.trustBasePath === undefined ? undefined : await loadTrustBase(selection.trustBasePath),
+  });
   const allowInsecure = flags.allowInsecure ?? false;
   if (new URL(network.gatewayUrl).protocol !== 'https:' && !allowInsecure) {
     throw usageError(

@@ -1,16 +1,11 @@
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
-
 import {
   bundledTrustBase,
   isNetworkName,
-  loadTrustBase,
   NETWORK_NAMES,
   networkNameForId,
   NETWORKS,
   resolveNetwork,
 } from '../../../src/lib/networks.js';
-import { tempDir } from '../../support/fixtures.js';
 
 describe('networks', () => {
   it('knows mainnet and testnet2 with the documented gateways and ids', () => {
@@ -41,28 +36,19 @@ describe('networks', () => {
     expect(isNetworkName('')).toBe(false);
   });
 
-  it('resolves mainnet by default and applies overrides', async () => {
-    const byDefault = await resolveNetwork();
+  it('resolves mainnet by default and applies overrides', () => {
+    const byDefault = resolveNetwork();
     expect(byDefault.preset).toEqual('mainnet');
     expect(byDefault.gatewayUrl).toEqual(NETWORKS.mainnet.gatewayUrl);
     expect(byDefault.trustBase.networkId.id).toBe(1);
 
-    const file = path.join(await tempDir(), 'trust-base.json');
-    await writeFile(file, JSON.stringify(NETWORKS.testnet2.trustBaseJson));
-    const overridden = await resolveNetwork({
+    const overridden = resolveNetwork({
       gatewayUrl: 'http://localhost:3000',
       network: 'mainnet',
-      trustBasePath: file,
+      trustBase: bundledTrustBase('testnet2'),
     });
     expect(overridden.preset).toEqual('mainnet');
     expect(overridden.gatewayUrl).toEqual('http://localhost:3000');
     expect(overridden.trustBase.networkId.id).toBe(4);
-  });
-
-  it('surfaces unreadable and malformed trust base files', async () => {
-    await expect(loadTrustBase('/nonexistent/trust-base.json')).rejects.toMatchObject({ code: 'ENOENT' });
-    const file = path.join(await tempDir(), 'broken.json');
-    await writeFile(file, '{"version": "1"}');
-    await expect(loadTrustBase(file)).rejects.toThrow();
   });
 });

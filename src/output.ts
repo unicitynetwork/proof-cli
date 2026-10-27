@@ -2,7 +2,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 
 import { networkNameForId, TrustBaseSource } from './lib/networks.js';
-import { ITimestampDescription, ITimestampVerificationResult } from './lib/TimestampClient.js';
+import { ITimestampDescription, ITimestampVerificationResult } from './lib/TimestampVerification.js';
 
 /** Minimal sink the commands write to; process.stdout and process.stderr satisfy it. */
 export interface IWriter {

@@ -3,7 +3,8 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
-import { describeToken, stampWith, verify } from '../../src/lib/TimestampClient.js';
+import { stampWith } from '../../src/lib/TimestampClient.js';
+import { describeToken, verify } from '../../src/lib/TimestampVerification.js';
 import {
   descriptionJson,
   formatIso,
