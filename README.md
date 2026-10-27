@@ -187,6 +187,47 @@ unicity-proof stamp --file document.pdf --gateway http://localhost:3000 --allow-
 
 The testnet2 key above is the shared public demo key published in the [sphere-sdk README](https://github.com/unicity-sphere/sphere-sdk/blob/main/README.md#api-key), where it is documented as public rather than secret; capacity is shared, so get your own key for sustained use. Trust bases for mainnet and testnet2 ship inside the package. The CLI never downloads a trust base at run time.
 
+### Library
+
+The package is importable as well as runnable. Verification has its own entry
+point that cannot reach a gateway: no aggregator client, no JSON-RPC transport,
+and no `node:` import anywhere in its module graph — 80 modules against the 137
+behind the package root, and nothing that can open a socket or read a file, which
+is what a browser bundle needs.
+
+```js
+import { readFile } from 'node:fs/promises';
+
+import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import { bundledTrustBase, networkNameForId, verify } from '@unicitylabs/proof-cli/verify';
+
+const token = await Token.fromCBOR(new Uint8Array(await readFile('document.cbor')));
+const network = networkNameForId(token.networkId.id);
+if (network === undefined) {
+  throw new Error(`No bundled trust base for network ${token.networkId.id}.`);
+}
+
+// digest is the document's own SHA-256. Without it the result says only that
+// some hash was certified, not that it was yours.
+const result = await verify(token, bundledTrustBase(network), { expectedDigest: digest });
+console.log(result.status, result.reason, result.referenceTime);
+```
+
+Stamping needs a gateway and an API key, so it lives at the package root, which
+re-exports everything above:
+
+```js
+import { resolveNetwork, stamp } from '@unicitylabs/proof-cli';
+
+const token = await stamp(digest, resolveNetwork({ network: 'testnet2' }), process.env.UNICITY_API_KEY);
+```
+
+Those two entry points are the whole public API; Node refuses deep imports into
+the implementation. Anything they do not export is internal and may change in any
+release. `tests/unit/PublicApiTest.ts` pins both export lists, and fails if a
+module in this package starts importing from `node:` or if the verification entry
+point gains a path to the aggregator.
+
 ## What a stamp proves
 
 A verified token shows that a transaction containing your hash was certified by the Unicity Network in a specific round, and records the round's reference time, which is at or before the consensus-signed round timestamp. If the stamp is signed, it also shows that the holder of the printed key signed the hash, and that this signature existed no later than the certified time.

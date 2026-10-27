@@ -15,7 +15,8 @@ import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verifi
 
 import { StampError } from '../../../src/lib/errors.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
-import { describeToken, stampWith, verificationFailure, verify } from '../../../src/lib/TimestampClient.js';
+import { stampWith } from '../../../src/lib/TimestampClient.js';
+import { describeToken, verificationFailure, verify } from '../../../src/lib/TimestampVerification.js';
 import { OTHER_DIGEST, TEST_DIGEST, TEST_DIGEST_HEX } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 

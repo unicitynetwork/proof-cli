@@ -6,6 +6,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import {
   hashFile,
   loadEnvironment,
+  loadTrustBase,
   parseDigest,
   parseNetworkName,
   parsePrivateKey,
@@ -113,6 +114,21 @@ describe('resolveNetworkSelection', () => {
   it('rejects unknown networks and invalid URLs', () => {
     expect(() => resolveNetworkSelection({ network: 'testnet' }, {})).toThrow(/Unknown network 'testnet'/);
     expect(() => resolveNetworkSelection({ gateway: 'not a url' }, {})).toThrow(/Invalid gateway URL/);
+  });
+});
+
+describe('loadTrustBase', () => {
+  it('parses a trust base file', async () => {
+    const file = path.join(await tempDir(), 'trust-base.json');
+    await writeFile(file, JSON.stringify(NETWORKS.testnet2.trustBaseJson));
+    expect((await loadTrustBase(file)).networkId.id).toBe(4);
+  });
+
+  it('surfaces unreadable and malformed files', async () => {
+    await expect(loadTrustBase('/nonexistent/trust-base.json')).rejects.toMatchObject({ code: 'ENOENT' });
+    const file = path.join(await tempDir(), 'broken.json');
+    await writeFile(file, '{"version": "1"}');
+    await expect(loadTrustBase(file)).rejects.toThrow();
   });
 });
 

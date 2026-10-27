@@ -1,7 +1,7 @@
 import { ICommandContext } from './context.js';
 import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
 import { EXIT_OK } from '../errors.js';
-import { describeToken } from '../lib/TimestampClient.js';
+import { describeToken } from '../lib/TimestampVerification.js';
 import { inspectJson, inspectText, toJsonLine } from '../output.js';
 
 /**
