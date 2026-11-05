@@ -112,6 +112,27 @@ Or put `UNICITY_PRIVATE_KEY=<64 hex>` in `.env` and every stamp is signed. Two f
 
 The signer's compressed public key is printed on every `stamp` and `verify`, as `Signer`, or `none` for anonymous stamps. Publish your public key wherever people need to recognise it; the key alone does not say who you are.
 
+### Stamp revisions (document lineage)
+
+`stamp-revision` links successive revisions of a document in one *lineage token*
+(design: [#13](https://github.com/unicitynetwork/proof-cli/issues/13#issuecomment-6440959902)).
+Each call certifies one revision and names who may produce the next:
+
+```bash
+# Revision 0: creates doc.lineage, signed by alice, and names bob as the next producer.
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file alice.key --recipient-key <bob's public key>
+# Revision 1: only bob's key can append; bob names carol (key read from a file holding 66 hex characters).
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file bob.key --recipient-key-file carol.pub
+```
+
+- Exactly one of `<sha256-hex>` and `--file`, and exactly one of `--recipient-key` and `--recipient-key-file`, is required. `--token-file` and `--key-file` are always required; `UNICITY_PRIVATE_KEY` is not consulted.
+- If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type and revision, which is what makes the origin "accepted"; the salt is random, so the token id cannot be predicted before the genesis is certified.
+- If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. The file is replaced atomically, and on any write failure the full token is printed as hex.
+- The state mask of each step is derived from the producer's key and the spent state, so if the command is interrupted after certification, running the same command again with the same file, key, digest and recipient recovers the same revision.
+- Network options behave as for `stamp`. `verify` and `inspect` do not yet understand lineage tokens.
+
+Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, auxiliary data])`. Verification additionally requires the indices to increase by one and the reference times not to decrease along the chain.
+
 ### Verify
 
 ```bash

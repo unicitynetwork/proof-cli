@@ -440,3 +440,156 @@ export async function resolveStampConfig(
 
   return { allowInsecure, apiKey, digest, force, network, out, signer, timeoutMs };
 }
+
+export interface IStampRevisionFlags extends INetworkFlags {
+  readonly allowInsecure?: boolean;
+  readonly apiKey?: string;
+  readonly file?: string;
+  readonly keyFile?: string;
+  readonly recipientKey?: string;
+  readonly recipientKeyFile?: string;
+  readonly timeout?: string;
+  readonly tokenFile?: string;
+}
+
+export interface IStampRevisionConfig {
+  readonly allowInsecure: boolean;
+  readonly apiKey: string;
+  readonly digest: Uint8Array;
+  readonly network: ITimestampNetwork;
+  /** Signs the new revision: the genesis reason for a new lineage, the transfer otherwise. */
+  readonly privateKey: Uint8Array;
+  /** Compressed public key of whoever produces the following revision. */
+  readonly recipientKey: Uint8Array;
+  readonly timeoutMs: number;
+  /** Bytes of the existing token file, or null when a new lineage is to be created. */
+  readonly tokenBytes: Uint8Array | null;
+  /** Absolute path of the token file. */
+  readonly tokenFile: string;
+}
+
+/** Compressed secp256k1 public key as hex, any case, optional 0x prefix. */
+const COMPRESSED_PUBLIC_KEY_HEX = /^(0x)?(02|03)[0-9a-fA-F]{64}$/;
+
+/**
+ * @param {string} input 66 hex characters of a compressed secp256k1 public key; surrounding whitespace allowed.
+ * @param {string} source How the key was given, for the error message.
+ * @returns {Uint8Array} 33-byte public key.
+ * @throws {CliError} If the input is not a valid compressed public key.
+ */
+export function parsePublicKey(input: string, source = 'Recipient key'): Uint8Array {
+  const trimmed = input.trim();
+  const message = `${source} must be a compressed secp256k1 public key of 66 hex characters.`;
+  if (!COMPRESSED_PUBLIC_KEY_HEX.test(trimmed)) {
+    throw usageError(message);
+  }
+  const key = HexConverter.decode(trimmed.replace(/^0x/, ''));
+  if (!SigningService.isPublicKeyValid(key)) {
+    throw usageError(`${source} is not a point on the secp256k1 curve.`);
+  }
+  return key;
+}
+
+async function resolveRecipientKey(flags: IStampRevisionFlags): Promise<Uint8Array> {
+  if (flags.recipientKey !== undefined && flags.recipientKeyFile !== undefined) {
+    throw usageError('Pass either --recipient-key or --recipient-key-file, not both.');
+  }
+  if (flags.recipientKey !== undefined) {
+    return parsePublicKey(flags.recipientKey, '--recipient-key');
+  }
+  if (flags.recipientKeyFile === undefined) {
+    throw usageError('Name the producer of the next revision: pass --recipient-key or --recipient-key-file.');
+  }
+  let contents: string;
+  try {
+    contents = await readFile(flags.recipientKeyFile, 'utf8');
+  } catch (error) {
+    throw usageError(`Cannot read recipient key file ${flags.recipientKeyFile}.`, { cause: error });
+  }
+  return parsePublicKey(contents, `Recipient key file ${flags.recipientKeyFile}`);
+}
+
+/**
+ * The token file is replaced through a temporary file in the same directory, and
+ * a new one is created there, so both cases need a writable directory; an existing
+ * file must also be readable. Checked before any network contact, for the same
+ * reason as {@link assertWritable}.
+ *
+ * @param {string} tokenFile Absolute path.
+ * @returns {Promise<boolean>} Whether the file exists.
+ */
+async function assertTokenFileUsable(tokenFile: string): Promise<boolean> {
+  const exists = await access(tokenFile).then(
+    () => true,
+    () => false,
+  );
+  const directory = path.dirname(tokenFile);
+  try {
+    await access(directory, constants.W_OK | constants.X_OK);
+  } catch (error) {
+    throw usageError(`Cannot write to the token file directory ${directory}.`, { cause: error });
+  }
+  return exists;
+}
+
+/**
+ * Everything `stamp-revision` needs, validated before any network contact.
+ *
+ * @param {string} [digestArgument] Positional digest.
+ * @param {IStampRevisionFlags} flags Command-line flags.
+ * @param {NodeJS.ProcessEnv} env Environment, after `.env` was loaded.
+ * @returns {Promise<IStampRevisionConfig>} Resolved configuration.
+ * @throws {CliError} On any missing or invalid setting.
+ */
+export async function resolveStampRevisionConfig(
+  digestArgument: string | undefined,
+  flags: IStampRevisionFlags,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<IStampRevisionConfig> {
+  if (digestArgument === undefined && flags.file === undefined) {
+    throw usageError('Pass a SHA-256 digest or --file <path>.');
+  }
+  assertOneDigestSource(digestArgument, flags.file);
+  if (flags.tokenFile === undefined) {
+    throw usageError('Pass --token-file <path>: the lineage token to create or append to.');
+  }
+  if (flags.keyFile === undefined) {
+    throw usageError('Pass --key-file <path>: the private key that signs the new revision.');
+  }
+
+  const apiKey = (flags.apiKey ?? env.UNICITY_API_KEY)?.trim();
+  if (!apiKey) {
+    throw usageError('No API key. Set UNICITY_API_KEY in the environment or .env, or pass --api-key.');
+  }
+
+  const selection = resolveNetworkSelection(flags, env);
+  const network = resolveNetwork({
+    gatewayUrl: selection.gatewayUrl,
+    network: selection.network,
+    trustBase: selection.trustBasePath === undefined ? undefined : await loadTrustBase(selection.trustBasePath),
+  });
+  const allowInsecure = flags.allowInsecure ?? false;
+  if (new URL(network.gatewayUrl).protocol !== 'https:' && !allowInsecure) {
+    throw usageError(
+      'The API key must not be sent over plain HTTP. Use an https gateway, or pass --allow-insecure for a local aggregator.',
+    );
+  }
+
+  const privateKey = parsePrivateKey(await readKeyFile(flags.keyFile));
+  const recipientKey = await resolveRecipientKey(flags);
+  const timeoutMs = parseTimeoutSeconds(flags.timeout ?? env.UNICITY_TIMEOUT);
+
+  const tokenFile = path.resolve(flags.tokenFile);
+  const exists = await assertTokenFileUsable(tokenFile);
+  let tokenBytes: Uint8Array | null = null;
+  if (exists) {
+    try {
+      tokenBytes = new Uint8Array(await readFile(tokenFile));
+    } catch (error) {
+      throw usageError(`Cannot read the token file ${tokenFile}.`, { cause: error });
+    }
+  }
+
+  const digest = (await resolveDigest(digestArgument, flags.file)) as Uint8Array;
+  return { allowInsecure, apiKey, digest, network, privateKey, recipientKey, timeoutMs, tokenBytes, tokenFile };
+}

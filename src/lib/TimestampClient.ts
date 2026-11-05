@@ -2,9 +2,11 @@ import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/Aggr
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { CertificationStatus } from '@unicitylabs/state-transition-sdk/lib/api/CertificationResponse.js';
+import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
+import type { ITransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/ITransaction.js';
 import { MintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/MintTransaction.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { VerificationContext } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/VerificationContext.js';
@@ -41,6 +43,54 @@ const KNOWN_STATUSES: readonly string[] = Object.values(CertificationStatus);
 const SUCCESS_STATUS: string = CertificationStatus.SUCCESS;
 
 /**
+ * Submit a certification request and wait for its inclusion proof.
+ *
+ * An unknown status is a warning rather than a failure: the aggregator answers a
+ * repeated request with `STATE_ID_EXISTS`, which the SDK does not list, and the
+ * proof that then arrives is checked against this transaction's hash anyway.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {VerificationContext} context Verification context for the network behind the client.
+ * @param {CertificationData} certificationData Request to submit.
+ * @param {ITransaction} transaction Transaction the request certifies.
+ * @param {ICertifyOptions} options Timeout, poll interval, abort signal, warning sink.
+ * @returns {Promise<InclusionProof>} Verified inclusion proof.
+ * @throws {StampError} If the aggregator returns a known failure status.
+ * @throws {SleepError} If the proof does not arrive before the timeout or abort.
+ */
+export async function certifyTransaction(
+  client: StateTransitionClient,
+  context: VerificationContext,
+  certificationData: CertificationData,
+  transaction: ITransaction,
+  options: ICertifyOptions = {},
+): Promise<InclusionProof> {
+  const response = await client.submitCertificationRequest(certificationData, { signal: options.signal });
+  if (response.status !== SUCCESS_STATUS) {
+    if (KNOWN_STATUSES.includes(response.status)) {
+      throw new StampError(response.status);
+    }
+    options.onWarning?.(
+      `Aggregator returned unknown status '${response.status}'; waiting for the inclusion proof anyway.`,
+    );
+  }
+
+  const signals = [AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)];
+  if (options.signal) {
+    signals.push(options.signal);
+  }
+  return waitInclusionProof(
+    client,
+    context.trustBase,
+    context.predicateVerifier,
+    context.unicityCertificateVerifier,
+    transaction,
+    AbortSignal.any(signals),
+    options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+  );
+}
+
+/**
  * Submit a mint transaction and wait for its inclusion proof.
  *
  * @param {StateTransitionClient} client Aggregator client.
@@ -57,32 +107,13 @@ export async function certifyMintTransaction(
   transaction: MintTransaction,
   options: ICertifyOptions = {},
 ): Promise<CertifiedMintTransaction> {
-  const response = await client.submitCertificationRequest(await CertificationData.fromMintTransaction(transaction), {
-    signal: options.signal,
-  });
-  if (response.status !== SUCCESS_STATUS) {
-    if (KNOWN_STATUSES.includes(response.status)) {
-      throw new StampError(response.status);
-    }
-    options.onWarning?.(
-      `Aggregator returned unknown status '${response.status}'; waiting for the inclusion proof anyway.`,
-    );
-  }
-
-  const signals = [AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)];
-  if (options.signal) {
-    signals.push(options.signal);
-  }
-  const proof = await waitInclusionProof(
+  const proof = await certifyTransaction(
     client,
-    context.trustBase,
-    context.predicateVerifier,
-    context.unicityCertificateVerifier,
+    context,
+    await CertificationData.fromMintTransaction(transaction),
     transaction,
-    AbortSignal.any(signals),
-    options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    options,
   );
-
   return transaction.toCertifiedTransaction(
     context.trustBase,
     context.predicateVerifier,

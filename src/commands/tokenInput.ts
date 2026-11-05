@@ -19,7 +19,16 @@ const HEX_TEXT = /^[0-9a-fA-F\s]+$/;
  * @returns {Promise<Uint8Array>} Token bytes.
  */
 export async function readTokenInput(file: string, stdin: NodeJS.ReadableStream): Promise<Uint8Array> {
-  const bytes = new Uint8Array(file === '-' ? await buffer(stdin) : await readFile(file));
+  return tokenBytesFromInput(new Uint8Array(file === '-' ? await buffer(stdin) : await readFile(file)));
+}
+
+/**
+ * Turn the contents of a token file into token bytes: hex text is decoded, anything else is taken as raw CBOR.
+ *
+ * @param {Uint8Array} bytes File contents.
+ * @returns {Uint8Array} Token bytes.
+ */
+export function tokenBytesFromInput(bytes: Uint8Array): Uint8Array {
   const text = new TextDecoder('latin1').decode(bytes);
   if (text.trim() !== '' && HEX_TEXT.test(text)) {
     const compact = text.replace(/\s+/g, '');

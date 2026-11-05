@@ -363,3 +363,93 @@ export function verifyJson(result: ITimestampVerificationResult, source: TrustBa
 export function inspectJson(description: ITimestampDescription): IInspectJson {
   return { command: 'inspect', verified: false, ...descriptionJson(description) };
 }
+
+/** What `stamp-revision` reports about the revision it just certified. */
+export interface IRevisionSummary {
+  readonly created: boolean;
+  readonly digest: Uint8Array;
+  readonly epoch: bigint;
+  readonly gatewayUrl: string;
+  readonly networkId: number;
+  readonly nextProducer: Uint8Array;
+  readonly referenceTime: bigint;
+  readonly revision: bigint;
+  readonly roundNumber: bigint;
+  readonly roundTimestamp: bigint;
+  readonly signer: Uint8Array;
+  readonly tokenFile: string;
+  readonly tokenId: Uint8Array;
+}
+
+export interface IRevisionJson {
+  readonly command: 'stamp-revision';
+  readonly created: boolean;
+  readonly hash: { readonly algorithm: 'SHA-256'; readonly digest: string };
+  readonly network: INetworkJson & { readonly gateway: string };
+  readonly nextProducer: string;
+  readonly referenceTime: string;
+  readonly referenceTimeIso: string | null;
+  readonly revision: string;
+  readonly round: { readonly epoch: string; readonly number: string; readonly timestamp: string };
+  readonly signer: string;
+  readonly tokenFile: string;
+  readonly tokenId: string;
+}
+
+/**
+ * @param {IRevisionSummary} summary The certified revision.
+ * @returns {string} Human summary of a `stamp-revision`.
+ */
+export function revisionText(summary: IRevisionSummary): string {
+  return [
+    line('Revision', `${summary.revision}${summary.created ? '  (new lineage)' : ''}`),
+    line('Stamped', `SHA-256 ${HexConverter.encode(summary.digest)}`),
+    line('Network', `${networkLabel(summary.networkId)} via ${summary.gatewayUrl}`),
+    line('Signed by', HexConverter.encode(summary.signer)),
+    line('Next producer', HexConverter.encode(summary.nextProducer)),
+    line('Certified at', `${formatIso(summary.referenceTime)}  (reference time ${summary.referenceTime})`),
+    line('Round', `${summary.roundNumber}  (round timestamp ${summary.roundTimestamp}, epoch ${summary.epoch})`),
+    line('Token id', HexConverter.encode(summary.tokenId)),
+    line('Written', summary.tokenFile),
+  ].join('\n');
+}
+
+/**
+ * @param {IRevisionSummary} summary The certified revision.
+ * @returns {IRevisionJson} JSON-safe summary; big integers as decimal strings.
+ */
+export function revisionJson(summary: IRevisionSummary): IRevisionJson {
+  return {
+    command: 'stamp-revision',
+    created: summary.created,
+    hash: { algorithm: 'SHA-256', digest: HexConverter.encode(summary.digest) },
+    network: { gateway: summary.gatewayUrl, id: summary.networkId, name: networkName(summary.networkId) },
+    nextProducer: HexConverter.encode(summary.nextProducer),
+    referenceTime: summary.referenceTime.toString(),
+    referenceTimeIso: toIso(summary.referenceTime),
+    revision: summary.revision.toString(),
+    round: {
+      epoch: summary.epoch.toString(),
+      number: summary.roundNumber.toString(),
+      timestamp: summary.roundTimestamp.toString(),
+    },
+    signer: HexConverter.encode(summary.signer),
+    tokenFile: summary.tokenFile,
+    tokenId: HexConverter.encode(summary.tokenId),
+  };
+}
+
+/**
+ * Last resort for a revision that was certified but could not be written.
+ *
+ * @param {Uint8Array} bytes Encoded token, including the new revision.
+ * @returns {string} Message and token hex, for stderr.
+ */
+export function revisionRecoveryLines(bytes: Uint8Array): string {
+  return [
+    'error: the revision was certified but the token file could not be written.',
+    'Save the token below; `stamp-revision --token-file` accepts hex text.',
+    HexConverter.encode(bytes),
+    '',
+  ].join('\n');
+}
