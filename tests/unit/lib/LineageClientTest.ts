@@ -56,7 +56,7 @@ class CountingClient implements IAggregatorClient {
   }
 }
 
-describe('document lineage', () => {
+describe('LineageClient', () => {
   const aggregator = TestAggregatorClient.create();
   const counting = new CountingClient(aggregator);
   const client = new StateTransitionClient(counting);
