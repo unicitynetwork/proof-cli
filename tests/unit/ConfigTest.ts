@@ -10,16 +10,25 @@ import {
   parseDigest,
   parseNetworkName,
   parsePrivateKey,
+  parsePublicKey,
   parseTimeoutSeconds,
   resolveDigest,
   resolveNetworkSelection,
   resolveStampConfig,
+  resolveStampRevisionConfig,
   resolveTrustBaseOverride,
 } from '../../src/config.js';
-import { CliError } from '../../src/errors.js';
+import { CliError, EXIT_USAGE } from '../../src/errors.js';
 import { NETWORKS } from '../../src/lib/networks.js';
 import { DEFAULT_TIMEOUT_MS } from '../../src/lib/TimestampClient.js';
-import { tempDir, TEST_DIGEST_HEX, TEST_PRIVATE_KEY_HEX, TEST_PUBLIC_KEY_HEX } from '../support/fixtures.js';
+import {
+  tempDir,
+  TEST_DIGEST,
+  TEST_DIGEST_HEX,
+  TEST_PRIVATE_KEY,
+  TEST_PRIVATE_KEY_HEX,
+  TEST_PUBLIC_KEY_HEX,
+} from '../support/fixtures.js';
 
 describe('parseDigest', () => {
   it('accepts upper and lower case with or without 0x', () => {
@@ -42,6 +51,16 @@ describe('parsePrivateKey', () => {
 
   it('rejects anything else', () => {
     expect(() => parsePrivateKey('01'.repeat(31))).toThrow('Private key must be 64 hex characters.');
+  });
+});
+
+describe('parsePublicKey', () => {
+  it('accepts a compressed key with or without 0x', () => {
+    expect(HexConverter.encode(parsePublicKey(`0x${TEST_PUBLIC_KEY_HEX}`))).toEqual(TEST_PUBLIC_KEY_HEX);
+  });
+
+  it('rejects a point that is not on the curve', () => {
+    expect(() => parsePublicKey(`02${'ff'.repeat(32)}`)).toThrow(/not a point/);
   });
 });
 
@@ -342,5 +361,110 @@ describe('resolveStampConfig', () => {
     expect(forced.force).toBe(true);
     const toStdout = await resolveStampConfig(TEST_DIGEST_HEX, { out: '-' }, env);
     expect(toStdout.out).toEqual('-');
+  });
+});
+
+describe('resolveStampRevisionConfig', () => {
+  const env = { UNICITY_API_KEY: 'key' };
+  let directory: string;
+  let keyFile: string;
+
+  beforeEach(async () => {
+    directory = await tempDir('proof-cli-revision-');
+    keyFile = path.join(directory, 'producer.key');
+    await writeFile(keyFile, `${TEST_PRIVATE_KEY_HEX}\n`);
+  });
+
+  const base = (): Record<string, string> => ({
+    keyFile,
+    recipientKey: TEST_PUBLIC_KEY_HEX,
+    tokenFile: path.join(directory, 'doc.lineage'),
+  });
+
+  it('resolves a new lineage', async () => {
+    const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), env);
+    expect(config.tokenBytes).toBeNull();
+    expect(config.digest).toEqual(TEST_DIGEST);
+    expect(config.privateKey).toEqual(TEST_PRIVATE_KEY);
+    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
+    expect(config.network.preset).toEqual('mainnet');
+  });
+
+  it('reads an existing token file and a recipient key file', async () => {
+    const tokenFile = path.join(directory, 'doc.lineage');
+    await writeFile(tokenFile, 'abcd');
+    const recipientKeyFile = path.join(directory, 'next.pub');
+    await writeFile(recipientKeyFile, ` ${TEST_PUBLIC_KEY_HEX.toUpperCase()}\n`);
+    const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, { keyFile, recipientKeyFile, tokenFile }, env);
+    expect(config.tokenBytes).toEqual(new TextEncoder().encode('abcd'));
+    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
+  });
+
+  it('resolves --finalize to no next producer', async () => {
+    const config = await resolveStampRevisionConfig(
+      TEST_DIGEST_HEX,
+      { ...base(), finalize: true, recipientKey: undefined },
+      env,
+    );
+    expect(config.recipientKey).toBeNull();
+  });
+
+  it.each([
+    ['no digest source', undefined, {}, 'Pass a SHA-256 digest or --file <path>.'],
+    ['both digest sources', TEST_DIGEST_HEX, { file: 'x' }, 'Pass either a digest or --file, not both.'],
+    ['no token file', TEST_DIGEST_HEX, { tokenFile: undefined }, /--token-file/],
+    ['no key file', TEST_DIGEST_HEX, { keyFile: undefined }, /--key-file/],
+    [
+      'no recipient',
+      TEST_DIGEST_HEX,
+      { recipientKey: undefined },
+      /--recipient-key or --recipient-key-file, or pass --finalize/,
+    ],
+    [
+      'both recipients',
+      TEST_DIGEST_HEX,
+      { recipientKeyFile: 'x' },
+      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --recipient-key-file.',
+    ],
+    [
+      'a recipient and --finalize',
+      TEST_DIGEST_HEX,
+      { finalize: true },
+      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --finalize.',
+    ],
+    [
+      'a recipient file and --finalize',
+      TEST_DIGEST_HEX,
+      { finalize: true, recipientKey: undefined, recipientKeyFile: 'x' },
+      /got --recipient-key-file and --finalize/,
+    ],
+    [
+      'all three',
+      TEST_DIGEST_HEX,
+      { finalize: true, recipientKeyFile: 'x' },
+      /got --recipient-key and --recipient-key-file and --finalize/,
+    ],
+    ['a malformed recipient', TEST_DIGEST_HEX, { recipientKey: '04abcd' }, /compressed secp256k1 public key/],
+    [
+      'a missing recipient file',
+      TEST_DIGEST_HEX,
+      { recipientKey: undefined, recipientKeyFile: '/no/such' },
+      /Cannot read/,
+    ],
+  ])('refuses %s', async (_, digest, overrides, message) => {
+    await expect(resolveStampRevisionConfig(digest, { ...base(), ...overrides }, env)).rejects.toMatchObject({
+      exitCode: EXIT_USAGE,
+    });
+    await expect(resolveStampRevisionConfig(digest, { ...base(), ...overrides }, env)).rejects.toThrow(message);
+  });
+
+  it('refuses a token file in a directory that does not exist', async () => {
+    await expect(
+      resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), tokenFile: path.join(directory, 'no', 'x') }, env),
+    ).rejects.toThrow(/Cannot write to the token file directory/);
+  });
+
+  it('requires an API key', async () => {
+    await expect(resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), {})).rejects.toThrow(/No API key/);
   });
 });

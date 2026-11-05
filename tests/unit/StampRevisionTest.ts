@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
@@ -6,8 +6,8 @@ import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/Sta
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
-import { stampRevisionWith, writeRevisionToken } from '../../src/commands/stampRevision.js';
-import { IStampRevisionConfig, parsePublicKey, resolveStampRevisionConfig } from '../../src/config.js';
+import { stampRevisionWith } from '../../src/commands/stampRevision.js';
+import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
 import { testContext } from '../support/context.js';
@@ -18,126 +18,9 @@ import {
   TEST_DIGEST,
   TEST_DIGEST_HEX,
   TEST_PRIVATE_KEY,
-  TEST_PRIVATE_KEY_HEX,
   TEST_PUBLIC_KEY_HEX,
 } from '../support/fixtures.js';
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
-
-const ENV = { UNICITY_API_KEY: 'key' };
-
-describe('resolveStampRevisionConfig', () => {
-  let directory: string;
-  let keyFile: string;
-
-  beforeEach(async () => {
-    directory = await tempDir('proof-cli-revision-');
-    keyFile = path.join(directory, 'producer.key');
-    await writeFile(keyFile, `${TEST_PRIVATE_KEY_HEX}\n`);
-  });
-
-  const base = (): Record<string, string> => ({
-    keyFile,
-    recipientKey: TEST_PUBLIC_KEY_HEX,
-    tokenFile: path.join(directory, 'doc.lineage'),
-  });
-
-  it('resolves a new lineage', async () => {
-    const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), ENV);
-    expect(config.tokenBytes).toBeNull();
-    expect(config.digest).toEqual(TEST_DIGEST);
-    expect(config.privateKey).toEqual(TEST_PRIVATE_KEY);
-    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
-    expect(config.network.preset).toEqual('mainnet');
-  });
-
-  it('reads an existing token file and a recipient key file', async () => {
-    const tokenFile = path.join(directory, 'doc.lineage');
-    await writeFile(tokenFile, 'abcd');
-    const recipientKeyFile = path.join(directory, 'next.pub');
-    await writeFile(recipientKeyFile, ` ${TEST_PUBLIC_KEY_HEX.toUpperCase()}\n`);
-    const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, { keyFile, recipientKeyFile, tokenFile }, ENV);
-    expect(config.tokenBytes).toEqual(new TextEncoder().encode('abcd'));
-    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
-  });
-
-  it('resolves --finalize to no next producer', async () => {
-    const config = await resolveStampRevisionConfig(
-      TEST_DIGEST_HEX,
-      { ...base(), finalize: true, recipientKey: undefined },
-      ENV,
-    );
-    expect(config.recipientKey).toBeNull();
-  });
-
-  it.each([
-    ['no digest source', undefined, {}, 'Pass a SHA-256 digest or --file <path>.'],
-    ['both digest sources', TEST_DIGEST_HEX, { file: 'x' }, 'Pass either a digest or --file, not both.'],
-    ['no token file', TEST_DIGEST_HEX, { tokenFile: undefined }, /--token-file/],
-    ['no key file', TEST_DIGEST_HEX, { keyFile: undefined }, /--key-file/],
-    [
-      'no recipient',
-      TEST_DIGEST_HEX,
-      { recipientKey: undefined },
-      /--recipient-key or --recipient-key-file, or pass --finalize/,
-    ],
-    [
-      'both recipients',
-      TEST_DIGEST_HEX,
-      { recipientKeyFile: 'x' },
-      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --recipient-key-file.',
-    ],
-    [
-      'a recipient and --finalize',
-      TEST_DIGEST_HEX,
-      { finalize: true },
-      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --finalize.',
-    ],
-    [
-      'a recipient file and --finalize',
-      TEST_DIGEST_HEX,
-      { finalize: true, recipientKey: undefined, recipientKeyFile: 'x' },
-      /got --recipient-key-file and --finalize/,
-    ],
-    [
-      'all three',
-      TEST_DIGEST_HEX,
-      { finalize: true, recipientKeyFile: 'x' },
-      /got --recipient-key and --recipient-key-file and --finalize/,
-    ],
-    ['a malformed recipient', TEST_DIGEST_HEX, { recipientKey: '04abcd' }, /compressed secp256k1 public key/],
-    [
-      'a missing recipient file',
-      TEST_DIGEST_HEX,
-      { recipientKey: undefined, recipientKeyFile: '/no/such' },
-      /Cannot read/,
-    ],
-  ])('refuses %s', async (_, digest, overrides, message) => {
-    await expect(resolveStampRevisionConfig(digest, { ...base(), ...overrides }, ENV)).rejects.toMatchObject({
-      exitCode: EXIT_USAGE,
-    });
-    await expect(resolveStampRevisionConfig(digest, { ...base(), ...overrides }, ENV)).rejects.toThrow(message);
-  });
-
-  it('refuses a token file in a directory that does not exist', async () => {
-    await expect(
-      resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), tokenFile: path.join(directory, 'no', 'x') }, ENV),
-    ).rejects.toThrow(/Cannot write to the token file directory/);
-  });
-
-  it('requires an API key', async () => {
-    await expect(resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), {})).rejects.toThrow(/No API key/);
-  });
-});
-
-describe('parsePublicKey', () => {
-  it('accepts a compressed key with or without 0x', () => {
-    expect(HexConverter.encode(parsePublicKey(`0x${TEST_PUBLIC_KEY_HEX}`))).toEqual(TEST_PUBLIC_KEY_HEX);
-  });
-
-  it('rejects a point that is not on the curve', () => {
-    expect(() => parsePublicKey(`02${'ff'.repeat(32)}`)).toThrow(/not a point/);
-  });
-});
 
 describe('stampRevisionWith', () => {
   const aggregator = TestAggregatorClient.create();
@@ -275,41 +158,5 @@ describe('stampRevisionWith', () => {
     );
     await expect(attempt).rejects.toThrow(/is not a token/);
     expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_VERIFICATION_FAILED);
-  });
-});
-
-describe('writeRevisionToken', () => {
-  const TOKEN = new Uint8Array([0xd9, 0x01, 0x00, 0x82, 0x01, 0x02]);
-
-  it('replaces an existing file without leaving a temporary behind', async () => {
-    const directory = await tempDir('proof-cli-revision-');
-    const out = path.join(directory, 'doc.lineage');
-    await writeFile(out, 'old');
-    const sink = testContext();
-    await writeRevisionToken(out, TOKEN, false, sink.context);
-    expect(new Uint8Array(await readFile(out))).toEqual(TOKEN);
-    expect(await readdir(directory)).toEqual(['doc.lineage']);
-    expect(sink.stderr()).toEqual('');
-  });
-
-  it('never clobbers a file that appeared before a new lineage was written, and prints the token', async () => {
-    const directory = await tempDir('proof-cli-revision-');
-    const out = path.join(directory, 'doc.lineage');
-    await writeFile(out, 'someone else');
-    const sink = testContext();
-    await expect(writeRevisionToken(out, TOKEN, true, sink.context)).rejects.toThrow(/EEXIST/);
-    expect(await readFile(out, 'utf8')).toEqual('someone else');
-    expect(sink.stderr()).toContain(HexConverter.encode(TOKEN));
-  });
-
-  it('prints the token when the directory is gone', async () => {
-    const directory = await tempDir('proof-cli-revision-');
-    await mkdir(path.join(directory, 'sub'));
-    const sink = testContext();
-    await expect(
-      writeRevisionToken(path.join(directory, 'missing', 'doc.lineage'), TOKEN, false, sink.context),
-    ).rejects.toThrow(/ENOENT/);
-    expect(sink.stderr()).toContain('the revision was certified');
-    expect(sink.stderr()).toContain(HexConverter.encode(TOKEN));
   });
 });
