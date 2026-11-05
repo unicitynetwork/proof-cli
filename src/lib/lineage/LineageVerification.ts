@@ -3,6 +3,7 @@ import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predic
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import { PredicateVerifierService } from '@unicitylabs/state-transition-sdk/lib/predicate/verification/PredicateVerifierService.js';
 import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
+import { CertifiedTransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedTransferTransaction.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { TokenType } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenType.js';
 import type { IMintJustificationVerifier } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/IMintJustificationVerifier.js';
@@ -126,12 +127,22 @@ export function createLineageVerificationContext(trustBase: RootTrustBase): Veri
 /** One revision of a lineage as read off the token. */
 export interface ILineageRevisionDescription {
   readonly digest: Uint8Array | null;
+  readonly epoch: bigint;
   readonly error: string | null;
   readonly index: bigint | null;
   /** Public key of the `P_sig` the revision names as producer of the next one; null for any other predicate. */
   readonly nextProducer: Uint8Array | null;
   /** Unix seconds. */
   readonly referenceTime: bigint;
+  readonly roundNumber: bigint;
+  /** Unix seconds; consensus-signed upper bound of the reference time. */
+  readonly roundTimestamp: bigint;
+  /**
+   * Who signed the revision as claimed by the token: the issuer named in the genesis
+   * reason for revision 0, otherwise the producer the previous revision named. Null
+   * when that is not a readable `P_sig` key.
+   */
+  readonly signer: Uint8Array | null;
 }
 
 /** What a lineage token claims, without verifying it. */
@@ -151,19 +162,26 @@ function signaturePredicateKey(predicate: EncodedPredicate): Uint8Array | null {
 }
 
 function describeRevision(
-  data: Uint8Array | null,
-  recipient: EncodedPredicate,
-  referenceTime: bigint,
+  transaction: CertifiedMintTransaction | CertifiedTransferTransaction,
+  signer: Uint8Array | null,
 ): ILineageRevisionDescription {
-  const nextProducer = signaturePredicateKey(recipient);
-  if (data === null) {
-    return { digest: null, error: 'no revision payload', index: null, nextProducer, referenceTime };
+  const certificate = transaction.inclusionProof.unicityCertificate;
+  const common = {
+    epoch: certificate.unicitySeal.epoch,
+    nextProducer: signaturePredicateKey(transaction.recipient),
+    referenceTime: transaction.referenceTime,
+    roundNumber: certificate.inputRecord.roundNumber,
+    roundTimestamp: certificate.inputRecord.timestamp,
+    signer,
+  };
+  if (transaction.data === null) {
+    return { ...common, digest: null, error: 'no revision payload', index: null };
   }
   try {
-    const revision = LineageRevision.fromCBOR(data);
-    return { digest: revision.digest, error: null, index: revision.index, nextProducer, referenceTime };
+    const revision = LineageRevision.fromCBOR(transaction.data);
+    return { ...common, digest: revision.digest, error: null, index: revision.index };
   } catch (error) {
-    return { digest: null, error: errorMessage(error), index: null, nextProducer, referenceTime };
+    return { ...common, digest: null, error: errorMessage(error), index: null };
   }
 }
 
@@ -182,23 +200,32 @@ export function describeLineage(token: Token): ILineageDescription {
       issuer = null;
     }
   }
+  const revisions = [describeRevision(token.genesis, issuer)];
+  for (const transaction of token.transactions) {
+    revisions.push(describeRevision(transaction, revisions[revisions.length - 1].nextProducer));
+  }
   return {
     issuer,
-    revisions: [
-      describeRevision(token.genesis.data, token.genesis.recipient, token.genesis.referenceTime),
-      ...token.transactions.map((transaction) =>
-        describeRevision(transaction.data, transaction.recipient, transaction.referenceTime),
-      ),
-    ],
+    revisions,
     token,
     tokenTypeIsLineage: areUint8ArraysEqual(token.type.bytes, LINEAGE_TOKEN_TYPE.bytes),
   };
+}
+
+export interface ILineageVerifyOptions {
+  /** Digest one of the revisions is expected to carry. */
+  readonly expectedDigest?: Uint8Array;
 }
 
 export interface ILineageVerificationResult {
   readonly description: ILineageDescription;
   /** SDK result tree, or null when it was not reached. */
   readonly details: Result | null;
+  /**
+   * Positions of the revisions that carry the expected digest; null when no digest
+   * was given or the comparison was not reached. Empty means a mismatch.
+   */
+  readonly matchingRevisions: readonly number[] | null;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
 }
@@ -252,18 +279,25 @@ function deepestMessage(result: VerificationResult<unknown>): string {
 
 /**
  * Verify a document lineage token offline: the SDK's full token verification with
- * the lineage issuance policy, then the chain rules.
+ * the lineage issuance policy, then the chain rules, then, if asked, whether any
+ * revision carries the expected digest.
  *
  * @param {Token} token Token to verify.
  * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {ILineageVerifyOptions} options Expected digest.
  * @returns {Promise<ILineageVerificationResult>} Outcome.
  */
-export async function verifyLineage(token: Token, trustBase: RootTrustBase): Promise<ILineageVerificationResult> {
+export async function verifyLineage(
+  token: Token,
+  trustBase: RootTrustBase,
+  options: ILineageVerifyOptions = {},
+): Promise<ILineageVerificationResult> {
   const description = describeLineage(token);
   if (!description.tokenTypeIsLineage) {
     return {
       description,
       details: null,
+      matchingRevisions: null,
       reason: `Not a document lineage token: token type ${HexConverter.encode(token.type.bytes)}.`,
       status: 'FAIL',
     };
@@ -272,6 +306,7 @@ export async function verifyLineage(token: Token, trustBase: RootTrustBase): Pro
     return {
       description,
       details: null,
+      matchingRevisions: null,
       reason: `The token is for network ${token.networkId.id} and the trust base for network ${trustBase.networkId.id}.`,
       status: 'FAIL',
     };
@@ -279,7 +314,24 @@ export async function verifyLineage(token: Token, trustBase: RootTrustBase): Pro
   const sdk = await token.verify(createLineageVerificationContext(trustBase));
   const details = VerificationResult.fromResults('LineageTokenVerification', [sdk, chainRules(description)]);
   if (details.status !== VerificationStatus.OK) {
-    return { description, details, reason: deepestMessage(details), status: 'FAIL' };
+    return { description, details, matchingRevisions: null, reason: deepestMessage(details), status: 'FAIL' };
   }
-  return { description, details, reason: null, status: 'OK' };
+  const expected = options.expectedDigest;
+  if (expected === undefined) {
+    return { description, details, matchingRevisions: null, reason: null, status: 'OK' };
+  }
+  // Every digest decoded: the chain rules above fail on any revision that does not.
+  const matchingRevisions = description.revisions.flatMap((revision, position) =>
+    revision.digest !== null && areUint8ArraysEqual(revision.digest, expected) ? [position] : [],
+  );
+  if (matchingRevisions.length === 0) {
+    return {
+      description,
+      details,
+      matchingRevisions,
+      reason: 'Hash mismatch: no revision of the lineage certifies this digest.',
+      status: 'FAIL',
+    };
+  }
+  return { description, details, matchingRevisions, reason: null, status: 'OK' };
 }

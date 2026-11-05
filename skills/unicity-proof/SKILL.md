@@ -23,6 +23,11 @@ Then read `Expected hash  matches`. Without `--file` or `--hash` that line tells
 you the proof was never tied to anything — a bare `Status OK` on its own
 establishes nothing about the file in front of you.
 
+A document lineage token (from `stamp-revision`, `Token type  document lineage`)
+holds several revisions. With `--file` it passes if **any** revision carries the
+file's hash, so read the `Expected hash` line in full: `matches revision 1;
+superseded by revision 2` means the file is a genuine but outdated revision.
+
 Also read the `Trust base` line. A verdict is only as good as the root of trust
 behind it, and `OK` against someone else's trust base means nothing.
 

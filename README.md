@@ -129,7 +129,35 @@ unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file 
 - If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type and revision, which is what makes the origin "accepted"; the salt is random, so the token id cannot be predicted before the genesis is certified.
 - If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. The file is replaced atomically, and on any write failure the full token is printed as hex.
 - The state mask of each step is derived from the producer's key and the spent state, so if the command is interrupted after certification, running the same command again with the same file, key, digest and recipient recovers the same revision.
-- Network options behave as for `stamp`. `verify` and `inspect` do not yet understand lineage tokens.
+- Network options behave as for `stamp`.
+
+`verify` and `inspect` recognise lineage tokens by their token type and list every revision with its hash, signer, next producer and certification time:
+
+```bash
+unicity-proof verify doc.lineage                  # is this a valid lineage?
+unicity-proof verify doc.lineage --file doc.pdf   # ...and which revision is this file?
+```
+
+```
+Status         OK  (inclusion proofs, consensus signatures, issuer signature and revision chain verified against the bundled testnet2 trust base)
+Trust base     bundled testnet2 pin
+Expected hash  matches revision 1; superseded by revision 2
+Token type     document lineage
+Network        testnet2 (4)
+Token id       5394db437e25b271272701e70e3f211ab4be2449fbe5b5d33664afa630b92357
+Issuer         031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f
+Revisions      3
+Next producer  034bf90f6fb27ac089cd5649adf2cf28c8d9711c66e5191cbceef04a2b7c85a368
+
+Revision 0     SHA-256 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  Signed by    031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f
+  Passes to    034bf90f6fb27ac089cd5649adf2cf28c8d9711c66e5191cbceef04a2b7c85a368
+  Certified at 2026-11-05T11:45:48Z  (reference time 1793879148)
+  Round        184233  (round timestamp 1793879149, epoch 1)
+…
+```
+
+With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision. In `--json` output a lineage has `"tokenType": "lineage"`, a `revisions` array and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
 
 Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, auxiliary data])`. Verification additionally requires the indices to increase by one and the reference times not to decrease along the chain.
 
@@ -164,7 +192,7 @@ The `Trust base` line says which root of trust produced that verdict — `bundle
 unicity-proof inspect document.cbor
 ```
 
-Prints the same fields as `verify` without checking anything, under an `UNVERIFIED` banner. Useful for looking at tokens from other networks or other token types.
+Prints the same fields as `verify` without checking anything, under an `UNVERIFIED` banner. Useful for looking at tokens from other networks or other token types. A lineage token is shown revision by revision, as by `verify`.
 
 ### Scripting
 

@@ -99,10 +99,10 @@ program
 
 program
   .command('verify')
-  .description('verify a timestamp token offline and print what it proves')
+  .description('verify a timestamp or document lineage token offline and print what it proves')
   .argument('<token-file>', 'token file, or "-" for stdin; raw CBOR or hex text')
-  .option('--hash <sha256-hex>', 'assert the token is for this digest')
-  .option('--file <path>', 'assert the token is for this file, hashed locally')
+  .option('--hash <sha256-hex>', 'assert the token is for this digest (for a lineage: one of its revisions)')
+  .option('--file <path>', 'assert the token is for this file, hashed locally (for a lineage: one of its revisions)')
   .option('--network <name>', "use this network's bundled trust base instead of the one matching the token")
   .option('--trust-base <path>', 'use this trust base file; or UNICITY_TRUST_BASE')
   .action(async (file: string, flags: IVerifyFlags) => {

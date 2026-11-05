@@ -1,6 +1,11 @@
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 
+import {
+  ILineageDescription,
+  ILineageRevisionDescription,
+  ILineageVerificationResult,
+} from './lib/lineage/LineageVerification.js';
 import { networkNameForId, TrustBaseSource } from './lib/networks.js';
 import { ITimestampDescription, ITimestampVerificationResult } from './lib/TimestampVerification.js';
 
@@ -452,4 +457,189 @@ export function revisionRecoveryLines(bytes: Uint8Array): string {
     HexConverter.encode(bytes),
     '',
   ].join('\n');
+}
+
+export interface ILineageRevisionJson {
+  readonly error: string | null;
+  readonly hash: { readonly algorithm: 'SHA-256'; readonly digest: string } | null;
+  /** The index the revision claims, as a decimal string; null when it does not decode. */
+  readonly index: string | null;
+  readonly nextProducer: string | null;
+  readonly referenceTime: string;
+  readonly referenceTimeIso: string | null;
+  readonly round: { readonly epoch: string; readonly number: string; readonly timestamp: string };
+  readonly signer: string | null;
+}
+
+export interface ILineageDescriptionJson {
+  readonly issuer: string | null;
+  readonly network: INetworkJson;
+  /** Who may sign the next revision: the latest revision's next producer. */
+  readonly nextProducer: string | null;
+  readonly revisions: ILineageRevisionJson[];
+  readonly tokenId: string;
+  readonly tokenType: 'lineage';
+}
+
+export interface ILineageVerifyJson extends ILineageDescriptionJson {
+  readonly command: 'verify';
+  readonly details: IResultJson | null;
+  readonly expectedHashMatches: boolean | null;
+  /** Positions of the revisions carrying the expected hash; null when not checked. */
+  readonly matchingRevisions: readonly number[] | null;
+  readonly reason: string | null;
+  readonly status: 'FAIL' | 'OK';
+  readonly trustBase: ITrustBaseJson | null;
+}
+
+export interface ILineageInspectJson extends ILineageDescriptionJson {
+  readonly command: 'inspect';
+  readonly verified: false;
+}
+
+function keyLabel(key: Uint8Array | null, otherwise: string): string {
+  return key === null ? otherwise : HexConverter.encode(key);
+}
+
+function latestNextProducer(description: ILineageDescription): Uint8Array | null {
+  return description.revisions.at(-1)?.nextProducer ?? null;
+}
+
+function lineageRevisionLines(revision: ILineageRevisionDescription, position: number): string[] {
+  const claimed =
+    revision.index !== null && revision.index !== BigInt(position) ? `  (claims index ${revision.index})` : '';
+  return [
+    line(
+      `Revision ${position}`,
+      revision.digest === null
+        ? `unreadable (${revision.error ?? 'no revision payload'})`
+        : `SHA-256 ${HexConverter.encode(revision.digest)}${claimed}`,
+    ),
+    line('  Signed by', keyLabel(revision.signer, 'not a signature predicate key')),
+    line('  Passes to', keyLabel(revision.nextProducer, 'not a signature predicate')),
+    line('  Certified at', `${formatIso(revision.referenceTime)}  (reference time ${revision.referenceTime})`),
+    line('  Round', `${revision.roundNumber}  (round timestamp ${revision.roundTimestamp}, epoch ${revision.epoch})`),
+  ];
+}
+
+function lineageLines(description: ILineageDescription): string[] {
+  const lines = [
+    line('Token type', 'document lineage'),
+    line('Network', networkLabel(description.token.networkId.id)),
+    line('Token id', HexConverter.encode(description.token.id.bytes)),
+    line('Issuer', keyLabel(description.issuer, 'unreadable genesis reason')),
+    line('Revisions', String(description.revisions.length)),
+    line('Next producer', keyLabel(latestNextProducer(description), 'not a signature predicate')),
+  ];
+  description.revisions.forEach((revision, position) => {
+    lines.push('', ...lineageRevisionLines(revision, position));
+  });
+  return lines;
+}
+
+// As for timestamps, relies on `verifyLineage` failing closed: an OK result with
+// no comparison can only mean no digest was given.
+function lineageExpectedHashLabel(result: ILineageVerificationResult): string {
+  const matching = result.matchingRevisions;
+  if (matching === null) {
+    return result.status === 'OK'
+      ? 'not checked; pass --file or --hash to find your document in the lineage'
+      : 'not checked; verification failed';
+  }
+  const latest = result.description.revisions.length - 1;
+  const last = matching.at(-1);
+  if (last === undefined) {
+    return 'differs from every revision';
+  }
+  const which = `matches revision${matching.length > 1 ? 's' : ''} ${matching.join(', ')}`;
+  return last === latest ? `${which} (the latest)` : `${which}; superseded by revision ${latest}`;
+}
+
+/**
+ * @param {ILineageVerificationResult} result Lineage verification outcome.
+ * @param {TrustBaseSource|null} source Root of trust the verdict was produced against.
+ * @returns {string} Human summary of a lineage verification, with the SDK result tree on failure.
+ */
+export function lineageVerifyText(result: ILineageVerificationResult, source: TrustBaseSource | null): string {
+  const against = source?.kind === 'bundled' ? `the bundled ${source.network} trust base` : `${source?.path}`;
+  const lines = [
+    line(
+      'Status',
+      result.status === 'OK'
+        ? `OK  (inclusion proofs, consensus signatures, issuer signature and revision chain verified against ${against})`
+        : `FAIL: ${result.reason ?? 'verification failed'}`,
+    ),
+    line('Trust base', trustBaseLabel(source)),
+    line('Expected hash', lineageExpectedHashLabel(result)),
+    ...lineageLines(result.description),
+  ];
+  if (result.status !== 'OK' && result.details !== null) {
+    lines.push('', result.details.toString());
+  }
+  return lines.join('\n');
+}
+
+/**
+ * @param {ILineageDescription} description Fields read off a lineage token.
+ * @returns {string} Human dump of a lineage token with no verification performed.
+ */
+export function lineageInspectText(description: ILineageDescription): string {
+  return [
+    line('UNVERIFIED', 'fields read from the token; nothing below has been checked'),
+    ...lineageLines(description),
+  ].join('\n');
+}
+
+function lineageRevisionJson(revision: ILineageRevisionDescription): ILineageRevisionJson {
+  return {
+    error: revision.error,
+    hash: revision.digest === null ? null : { algorithm: 'SHA-256', digest: HexConverter.encode(revision.digest) },
+    index: revision.index === null ? null : revision.index.toString(),
+    nextProducer: revision.nextProducer === null ? null : HexConverter.encode(revision.nextProducer),
+    referenceTime: revision.referenceTime.toString(),
+    referenceTimeIso: toIso(revision.referenceTime),
+    round: {
+      epoch: revision.epoch.toString(),
+      number: revision.roundNumber.toString(),
+      timestamp: revision.roundTimestamp.toString(),
+    },
+    signer: revision.signer === null ? null : HexConverter.encode(revision.signer),
+  };
+}
+
+/**
+ * @param {ILineageDescription} description Fields read off a lineage token.
+ * @returns {ILineageDescriptionJson} JSON-safe fields; big integers as decimal strings.
+ */
+export function lineageDescriptionJson(description: ILineageDescription): ILineageDescriptionJson {
+  const networkId = description.token.networkId.id;
+  const nextProducer = latestNextProducer(description);
+  return {
+    issuer: description.issuer === null ? null : HexConverter.encode(description.issuer),
+    network: { id: networkId, name: networkName(networkId) },
+    nextProducer: nextProducer === null ? null : HexConverter.encode(nextProducer),
+    revisions: description.revisions.map((revision) => lineageRevisionJson(revision)),
+    tokenId: HexConverter.encode(description.token.id.bytes),
+    tokenType: 'lineage',
+  };
+}
+
+export function lineageVerifyJson(
+  result: ILineageVerificationResult,
+  source: TrustBaseSource | null,
+): ILineageVerifyJson {
+  return {
+    command: 'verify',
+    expectedHashMatches: result.matchingRevisions === null ? null : result.matchingRevisions.length > 0,
+    matchingRevisions: result.matchingRevisions,
+    reason: result.reason,
+    status: result.status,
+    ...lineageDescriptionJson(result.description),
+    details: result.details ? resultTreeJson(result.details) : null,
+    trustBase: trustBaseJson(source),
+  };
+}
+
+export function lineageInspectJson(description: ILineageDescription): ILineageInspectJson {
+  return { command: 'inspect', verified: false, ...lineageDescriptionJson(description) };
 }
