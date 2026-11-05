@@ -2,6 +2,7 @@ import { chmod, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { runKeygen } from '../../src/commands/keygen.js';
+import { keygenJson, keygenText } from '../../src/output.js';
 import { testContext } from '../support/context.js';
 import { tempDir } from '../support/fixtures.js';
 
@@ -61,5 +62,18 @@ describe('runKeygen when the staged write cannot complete', () => {
     await chmod(directory, 0o700);
     expect(await readdir(directory)).toEqual(['target.key']);
     expect(await readFile(out, 'utf8')).toEqual('placeholder\n');
+  });
+});
+
+describe('keygen output', () => {
+  it('reports the key file and public key, and the private key only when printed', () => {
+    expect(keygenText('/k', '02ab')).toEqual('Key written    /k (mode 0600)\nPublic key     02ab');
+    expect(keygenJson('/k', '02ab')).toEqual({ command: 'keygen', out: '/k', publicKey: '02ab' });
+    expect(keygenJson(null, '02ab', 'ff')).toEqual({
+      command: 'keygen',
+      out: null,
+      privateKey: 'ff',
+      publicKey: '02ab',
+    });
   });
 });

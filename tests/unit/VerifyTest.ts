@@ -6,6 +6,8 @@ import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/Sta
 import { runVerify } from '../../src/commands/verify.js';
 import { EXIT_OK, EXIT_USAGE, EXIT_VERIFICATION_FAILED } from '../../src/errors.js';
 import { stampWith } from '../../src/lib/TimestampClient.js';
+import { verify } from '../../src/lib/TimestampVerification.js';
+import { verifyJson, verifyText } from '../../src/output.js';
 import { testContext } from '../support/context.js';
 import { OTHER_DIGEST_HEX, tempDir, TEST_DIGEST, TEST_DIGEST_HEX, TEST_PUBLIC_KEY_HEX } from '../support/fixtures.js';
 import {
@@ -15,6 +17,7 @@ import {
   THIRD_DIGEST_HEX,
 } from '../support/LineageFixtures.js';
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
+import { createTimestampToken } from '../support/TimestampFixtures.js';
 
 // The in-memory aggregator's network id matches no bundled pin, which is the
 // token `verify` cannot place and has to report before any trust base exists.
@@ -152,6 +155,48 @@ describe('runVerify on a document lineage', () => {
       status: 'FAIL',
       tokenType: 'lineage',
       trustBase: null,
+    });
+  });
+});
+
+describe('verify output for a timestamp', () => {
+  const aggregator = TestAggregatorClient.create();
+  const trustBase = aggregator.rootTrustBase;
+  const bundled = { kind: 'bundled', network: 'testnet2' } as const;
+
+  it('reports the verdict, the trust base and the expected hash', async () => {
+    const token = await createTimestampToken(aggregator, TEST_DIGEST);
+    const ok = await verify(token, trustBase, { expectedDigest: TEST_DIGEST });
+    expect(verifyText(ok, bundled)).toContain(
+      'Status         OK  (inclusion proof, consensus signatures and payload verified against the bundled testnet2 trust base)',
+    );
+    expect(verifyText(ok, bundled)).toContain('Trust base     bundled testnet2 pin');
+    expect(verifyText(ok, bundled)).toContain('Expected hash  matches');
+    const unchecked = await verify(token, trustBase);
+    expect(verifyText(unchecked, bundled)).toContain('Expected hash  not checked; pass --file or --hash');
+    expect(verifyJson(ok, bundled)).toMatchObject({
+      command: 'verify',
+      expectedHashMatches: true,
+      reason: null,
+      status: 'OK',
+      trustBase: { bundledNetwork: 'testnet2', path: null, source: 'bundled' },
+    });
+    expect(verifyJson(ok, bundled).details?.status).toEqual('OK');
+
+    // No trust base could be selected at all, which is how `verify` reports a
+    // token whose network id matches no bundled pin.
+    expect(verifyText(ok, null)).toContain('Trust base     none selected');
+    expect(verifyJson(ok, null).trustBase).toBeNull();
+
+    // An override must never be able to present itself as the bundled pin.
+    const override = { kind: 'file', path: '/tmp/rogue.json' } as const;
+    expect(verifyText(ok, override)).toContain('Trust base     /tmp/rogue.json  (override, not the bundled pin)');
+    expect(verifyText(ok, override)).toContain('verified against /tmp/rogue.json');
+    expect(verifyText(ok, override)).not.toContain('the bundled testnet2 trust base');
+    expect(verifyJson(ok, override).trustBase).toEqual({
+      bundledNetwork: null,
+      path: '/tmp/rogue.json',
+      source: 'file',
     });
   });
 });
