@@ -2,12 +2,15 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
+import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
+import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
 import { runVerify } from '../../src/commands/verify.js';
 import { EXIT_OK, EXIT_USAGE, EXIT_VERIFICATION_FAILED } from '../../src/errors.js';
+import { describeLineage, ILineageVerificationResult } from '../../src/lib/LineageVerification.js';
 import { stampWith } from '../../src/lib/TimestampClient.js';
 import { verify } from '../../src/lib/TimestampVerification.js';
-import { verifyJson, verifyText } from '../../src/output.js';
+import { lineageVerifyJson, lineageVerifyText, verifyJson, verifyText } from '../../src/output.js';
 import { testContext } from '../support/context.js';
 import { OTHER_DIGEST_HEX, tempDir, TEST_DIGEST, TEST_DIGEST_HEX, TEST_PUBLIC_KEY_HEX } from '../support/fixtures.js';
 import {
@@ -197,6 +200,124 @@ describe('verify output for a timestamp', () => {
       bundledNetwork: null,
       path: '/tmp/rogue.json',
       source: 'file',
+    });
+  });
+});
+
+describe('verify output for a document lineage', () => {
+  const bundled = { kind: 'bundled', network: 'testnet2' } as const;
+  const override = { kind: 'file', path: '/tmp/rogue.json' } as const;
+  let fixture: ILineageFixture;
+
+  beforeAll(async () => {
+    fixture = await createLineageFixture();
+  });
+
+  /** A verification outcome for the open lineage, OK unless overridden. */
+  function result(changes: Partial<ILineageVerificationResult> = {}): ILineageVerificationResult {
+    return {
+      description: describeLineage(fixture.token),
+      details: null,
+      matchingRevisions: null,
+      reason: null,
+      status: 'OK',
+      ...changes,
+    };
+  }
+
+  it('names the trust base the verdict was reached against', () => {
+    const text = lineageVerifyText(result(), bundled);
+    expect(text).toMatch(
+      /^Status {9}OK {2}\(inclusion proofs, consensus signatures, issuer signature and revision chain verified against the bundled testnet2 trust base\)\n/,
+    );
+    expect(text).toContain('Trust base     bundled testnet2 pin\n');
+    expect(text).toContain('Token type     document lineage\n');
+    expect(text).toContain('Revisions      3\n');
+
+    // An override must never be able to present itself as the bundled pin.
+    const overridden = lineageVerifyText(result(), override);
+    expect(overridden).toContain('verified against /tmp/rogue.json)');
+    expect(overridden).toContain('Trust base     /tmp/rogue.json  (override, not the bundled pin)\n');
+    expect(overridden).not.toContain('bundled testnet2 trust base');
+    expect(lineageVerifyJson(result(), override).trustBase).toEqual({
+      bundledNetwork: null,
+      path: '/tmp/rogue.json',
+      source: 'file',
+    });
+    expect(lineageVerifyJson(result(), bundled).trustBase).toEqual({
+      bundledNetwork: 'testnet2',
+      path: null,
+      source: 'bundled',
+    });
+  });
+
+  it.each<[string, readonly number[] | null, string]>([
+    ['no digest given', null, 'not checked; pass --file or --hash to find your document in the lineage'],
+    ['the latest revision', [2], 'matches revision 2 (the latest)'],
+    ['an older revision', [1], 'matches revision 1; superseded by revision 2'],
+    ['several revisions', [0, 2], 'matches revisions 0, 2 (the latest)'],
+    ['no revision', [], 'differs from every revision'],
+  ])('labels the expected hash when it matches %s', (_, matchingRevisions, label) => {
+    expect(lineageVerifyText(result({ matchingRevisions }), bundled)).toContain(`Expected hash  ${label}\n`);
+  });
+
+  it('labels a match on the seal as the final revision', () => {
+    const final = result({ description: describeLineage(fixture.sealed), matchingRevisions: [3] });
+    expect(lineageVerifyText(final, bundled)).toContain('Expected hash  matches revision 3 (the final)\n');
+    expect(lineageVerifyJson(final, bundled)).toMatchObject({ finalized: true, nextProducer: null });
+  });
+
+  it('reports a failure with its reason and the result tree', () => {
+    const details = new VerificationResult('LineageTokenVerification', VerificationStatus.FAIL, '', [
+      new VerificationResult(
+        'Revision[1]SealBurned',
+        VerificationStatus.FAIL,
+        'Revision 1 is a seal, but is not burned.',
+      ),
+    ]);
+    const failed = result({ details, reason: 'Revision 1 is a seal, but is not burned.', status: 'FAIL' });
+
+    const text = lineageVerifyText(failed, bundled);
+    expect(text).toMatch(/^Status {9}FAIL: Revision 1 is a seal, but is not burned\.\n/);
+    expect(text).toContain('Expected hash  not checked; verification failed\n');
+    expect(text).toContain('Revision[1]SealBurned');
+    expect(text.endsWith(details.toString())).toBe(true);
+
+    expect(lineageVerifyJson(failed, bundled)).toMatchObject({
+      command: 'verify',
+      details: {
+        results: [
+          { message: 'Revision 1 is a seal, but is not burned.', rule: 'Revision[1]SealBurned', status: 'FAIL' },
+        ],
+        rule: 'LineageTokenVerification',
+        status: 'FAIL',
+      },
+      expectedHashMatches: null,
+      matchingRevisions: null,
+      reason: 'Revision 1 is a seal, but is not burned.',
+      status: 'FAIL',
+      tokenType: 'lineage',
+    });
+  });
+
+  it('reports a failure before any result tree without one', () => {
+    const failed = result({ reason: null, status: 'FAIL' });
+    const text = lineageVerifyText(failed, null);
+    expect(text).toMatch(/^Status {9}FAIL: verification failed\n/);
+    expect(text).toContain('Trust base     none selected\n');
+    // Ends with the last revision, not with an empty result tree.
+    expect(text).toMatch(/ {2}Round {8}\d+ {2}\(round timestamp \d+, epoch \d+\)$/);
+    expect(lineageVerifyJson(failed, null)).toMatchObject({ details: null, trustBase: null });
+  });
+
+  it('reports a mismatch as such in JSON', () => {
+    expect(lineageVerifyJson(result({ matchingRevisions: [] }), bundled)).toMatchObject({
+      expectedHashMatches: false,
+      matchingRevisions: [],
+    });
+    expect(lineageVerifyJson(result({ matchingRevisions: [0, 2] }), bundled)).toMatchObject({
+      expectedHashMatches: true,
+      matchingRevisions: [0, 2],
     });
   });
 });

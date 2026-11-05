@@ -19,6 +19,8 @@ export const SEAL_DIGEST_HEX = 'cd'.repeat(32);
 export interface ILineageFixture {
   readonly bobPublicHex: string;
   /** The finalized lineage: {@link token} with a seal appended by bob. */
+  readonly sealed: Token;
+  /** Where {@link sealed} is written. */
   readonly sealedFile: string;
   /** Three revisions: 0 by the issuer naming bob, 1 by bob naming the issuer, 2 by the issuer naming bob. */
   readonly token: Token;
@@ -63,5 +65,5 @@ export async function createLineageFixture(): Promise<ILineageFixture> {
   const trustBaseFile = path.join(directory, 'trust-base.json');
   await writeFile(trustBaseFile, JSON.stringify(trustBase.toJSON()));
 
-  return { bobPublicHex: HexConverter.encode(bobPublic), sealedFile, token, tokenFile, trustBaseFile };
+  return { bobPublicHex: HexConverter.encode(bobPublic), sealed, sealedFile, token, tokenFile, trustBaseFile };
 }

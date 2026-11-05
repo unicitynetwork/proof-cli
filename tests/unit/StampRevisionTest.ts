@@ -10,6 +10,7 @@ import { stampRevisionWith } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
+import { IRevisionSummary, revisionJson, revisionRecoveryLines, revisionText } from '../../src/output.js';
 import { testContext } from '../support/context.js';
 import {
   OTHER_DIGEST,
@@ -158,5 +159,80 @@ describe('stampRevisionWith', () => {
     );
     await expect(attempt).rejects.toThrow(/is not a token/);
     expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_VERIFICATION_FAILED);
+  });
+});
+
+describe('stamp-revision output', () => {
+  const producer = HexConverter.decode(TEST_PUBLIC_KEY_HEX);
+  const next = new SigningService(SigningService.generatePrivateKey()).publicKey;
+  const summary: IRevisionSummary = {
+    created: false,
+    digest: TEST_DIGEST,
+    epoch: 1n,
+    gatewayUrl: 'https://gateway.test',
+    networkId: 4,
+    nextProducer: next,
+    referenceTime: 1791200527n,
+    revision: 2n,
+    roundNumber: 184233n,
+    roundTimestamp: 1791200528n,
+    signer: producer,
+    tokenFile: '/docs/doc.lineage',
+    tokenId: new Uint8Array(32).fill(0xaa),
+  };
+
+  it('reports the revision, who signed it and who may produce the next', () => {
+    expect(revisionText(summary)).toEqual(
+      [
+        'Revision       2',
+        `Stamped        SHA-256 ${TEST_DIGEST_HEX}`,
+        'Network        testnet2 (4) via https://gateway.test',
+        `Signed by      ${TEST_PUBLIC_KEY_HEX}`,
+        `Next producer  ${HexConverter.encode(next)}`,
+        'Certified at   2026-10-05T11:42:07Z  (reference time 1791200527)',
+        'Round          184233  (round timestamp 1791200528, epoch 1)',
+        `Token id       ${'aa'.repeat(32)}`,
+        'Written        /docs/doc.lineage',
+      ].join('\n'),
+    );
+  });
+
+  it('marks a new lineage and a final revision', () => {
+    expect(revisionText({ ...summary, created: true, revision: 0n })).toContain('Revision       0  (new lineage)\n');
+    const final = revisionText({ ...summary, nextProducer: null });
+    expect(final).toContain('Revision       2  (final)\n');
+    expect(final).toContain('Next producer  none; the lineage is finalized (sealed and burned)\n');
+    expect(revisionText({ ...summary, created: true, nextProducer: null, revision: 0n })).toContain(
+      'Revision       0  (new lineage)  (final)\n',
+    );
+  });
+
+  it('renders the same fields as JSON, big integers as decimal strings', () => {
+    expect(revisionJson(summary)).toEqual({
+      command: 'stamp-revision',
+      created: false,
+      finalized: false,
+      hash: { algorithm: 'SHA-256', digest: TEST_DIGEST_HEX },
+      network: { gateway: 'https://gateway.test', id: 4, name: 'testnet2' },
+      nextProducer: HexConverter.encode(next),
+      referenceTime: '1791200527',
+      referenceTimeIso: '2026-10-05T11:42:07Z',
+      revision: '2',
+      round: { epoch: '1', number: '184233', timestamp: '1791200528' },
+      signer: TEST_PUBLIC_KEY_HEX,
+      tokenFile: '/docs/doc.lineage',
+      tokenId: 'aa'.repeat(32),
+    });
+    expect(revisionJson({ ...summary, nextProducer: null })).toMatchObject({ finalized: true, nextProducer: null });
+    expect(revisionJson({ ...summary, referenceTime: 10n ** 30n }).referenceTimeIso).toBeNull();
+  });
+
+  it('hands back a token it could not write, in a form --token-file accepts', () => {
+    const lines = revisionRecoveryLines(new Uint8Array([0xd9, 0x01, 0x00]));
+    expect(lines).toEqual(
+      'error: the revision was certified but the token file could not be written.\n' +
+        'Save the token below; `stamp-revision --token-file` accepts hex text.\n' +
+        'd90100\n',
+    );
   });
 });
