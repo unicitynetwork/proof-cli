@@ -13,7 +13,7 @@ import { ICommandContext } from './context.js';
 import { decodeToken, tokenBytesFromInput } from './tokenInput.js';
 import { IStampRevisionConfig, IStampRevisionFlags, resolveStampRevisionConfig } from '../config.js';
 import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
-import { appendRevision, createLineage } from '../lib/lineage/LineageClient.js';
+import { appendRevision, createLineage } from '../lib/LineageClient.js';
 import { revisionJson, revisionRecoveryLines, revisionText, toJsonLine, warningLine } from '../output.js';
 
 /**

@@ -24,7 +24,7 @@ import {
   sealPredicate,
 } from './LineagePayload.js';
 import { createLineageVerificationContext, verifyLineage } from './LineageVerification.js';
-import { ICertifyOptions, certifyMintTransaction, certifyTransaction } from '../TimestampClient.js';
+import { ICertifyOptions, certifyMintTransaction, certifyTransaction } from './TimestampClient.js';
 
 /** Thrown when a revision cannot be appended to the given token with the given key. */
 export class LineageError extends Error {

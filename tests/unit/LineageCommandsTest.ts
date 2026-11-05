@@ -9,7 +9,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { runInspect } from '../../src/commands/inspect.js';
 import { runVerify } from '../../src/commands/verify.js';
 import { EXIT_OK, EXIT_VERIFICATION_FAILED } from '../../src/errors.js';
-import { appendRevision, createLineage } from '../../src/lib/lineage/LineageClient.js';
+import { appendRevision, createLineage } from '../../src/lib/LineageClient.js';
 import { testContext } from '../support/context.js';
 import {
   OTHER_DIGEST,

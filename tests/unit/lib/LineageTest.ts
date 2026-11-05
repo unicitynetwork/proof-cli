@@ -23,7 +23,7 @@ import {
   currentProducerKey,
   isFinalized,
   LineageError,
-} from '../../../src/lib/lineage/LineageClient.js';
+} from '../../../src/lib/LineageClient.js';
 import {
   LINEAGE_TAG,
   LINEAGE_TOKEN_TYPE,
@@ -32,8 +32,8 @@ import {
   LineageGenesisReason,
   LineageRevision,
   sealPredicate,
-} from '../../../src/lib/lineage/LineagePayload.js';
-import { describeLineage, verifyLineage } from '../../../src/lib/lineage/LineageVerification.js';
+} from '../../../src/lib/LineagePayload.js';
+import { describeLineage, verifyLineage } from '../../../src/lib/LineageVerification.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
 import { stampWith } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST } from '../../support/fixtures.js';

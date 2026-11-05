@@ -2,7 +2,7 @@ import { ICommandContext } from './context.js';
 import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
 import { assertOneDigestSource, INetworkFlags, resolveDigest, resolveTrustBaseOverride } from '../config.js';
 import { EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
-import { describeLineage, ILineageVerificationResult, verifyLineage } from '../lib/lineage/LineageVerification.js';
+import { describeLineage, ILineageVerificationResult, verifyLineage } from '../lib/LineageVerification.js';
 import { bundledTrustBase, ITrustBaseChoice, networkNameForId, TrustBaseSource } from '../lib/networks.js';
 import {
   describeToken,

@@ -9,7 +9,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { stampRevisionWith, writeRevisionToken } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig, parsePublicKey, resolveStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
-import { verifyLineage } from '../../src/lib/lineage/LineageVerification.js';
+import { verifyLineage } from '../../src/lib/LineageVerification.js';
 import { testContext } from '../support/context.js';
 import {
   OTHER_DIGEST,

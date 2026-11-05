@@ -1,7 +1,7 @@
 import { ICommandContext } from './context.js';
 import { decodeToken, readTokenInput, reportNotAToken } from './tokenInput.js';
 import { EXIT_OK } from '../errors.js';
-import { describeLineage } from '../lib/lineage/LineageVerification.js';
+import { describeLineage } from '../lib/LineageVerification.js';
 import { describeToken } from '../lib/TimestampVerification.js';
 import { inspectJson, inspectText, lineageInspectJson, lineageInspectText, toJsonLine } from '../output.js';
 

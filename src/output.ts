@@ -5,7 +5,7 @@ import {
   ILineageDescription,
   ILineageRevisionDescription,
   ILineageVerificationResult,
-} from './lib/lineage/LineageVerification.js';
+} from './lib/LineageVerification.js';
 import { networkNameForId, TrustBaseSource } from './lib/networks.js';
 import { ITimestampDescription, ITimestampVerificationResult } from './lib/TimestampVerification.js';
 

@@ -5,7 +5,7 @@ import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/Inclusion
 import { VerificationError } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationError.js';
 
 import { errorMessage, StampError } from './lib/errors.js';
-import { LineageError } from './lib/lineage/LineageClient.js';
+import { LineageError } from './lib/LineageClient.js';
 
 export const EXIT_OK = 0;
 /** Verification failed, hash mismatch, or the input is not a token. */

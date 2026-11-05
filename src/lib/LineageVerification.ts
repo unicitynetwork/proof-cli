@@ -17,6 +17,7 @@ import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
+import { errorMessage } from './errors.js';
 import {
   LINEAGE_GENESIS_REASON_TAG,
   LINEAGE_TOKEN_TYPE,
@@ -24,8 +25,7 @@ import {
   LineageRevision,
   sealPredicate,
 } from './LineagePayload.js';
-import { errorMessage } from '../errors.js';
-import { createUnicityCertificateVerifier } from '../verification.js';
+import { createUnicityCertificateVerifier } from './verification.js';
 
 type Result = VerificationResult<VerificationStatus>;
 
