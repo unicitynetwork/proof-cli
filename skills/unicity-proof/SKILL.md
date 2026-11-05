@@ -27,6 +27,8 @@ A document lineage token (from `stamp-revision`, `Token type  document lineage`)
 holds several revisions. With `--file` it passes if **any** revision carries the
 file's hash, so read the `Expected hash` line in full: `matches revision 1;
 superseded by revision 2` means the file is a genuine but outdated revision.
+`matches revision 2 (the final)` means the lineage was finalized with that
+revision (`--finalize`); no later revision can exist.
 
 Also read the `Trust base` line. A verdict is only as good as the root of trust
 behind it, and `OK` against someone else's trust base means nothing.

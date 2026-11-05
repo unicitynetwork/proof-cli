@@ -376,7 +376,8 @@ export interface IRevisionSummary {
   readonly epoch: bigint;
   readonly gatewayUrl: string;
   readonly networkId: number;
-  readonly nextProducer: Uint8Array;
+  /** Null when the revision finalized the lineage. */
+  readonly nextProducer: Uint8Array | null;
   readonly referenceTime: bigint;
   readonly revision: bigint;
   readonly roundNumber: bigint;
@@ -389,9 +390,12 @@ export interface IRevisionSummary {
 export interface IRevisionJson {
   readonly command: 'stamp-revision';
   readonly created: boolean;
+  /** True when this revision sealed the lineage, so that no revision can follow. */
+  readonly finalized: boolean;
   readonly hash: { readonly algorithm: 'SHA-256'; readonly digest: string };
   readonly network: INetworkJson & { readonly gateway: string };
-  readonly nextProducer: string;
+  /** Null when the revision finalized the lineage. */
+  readonly nextProducer: string | null;
   readonly referenceTime: string;
   readonly referenceTimeIso: string | null;
   readonly revision: string;
@@ -407,11 +411,14 @@ export interface IRevisionJson {
  */
 export function revisionText(summary: IRevisionSummary): string {
   return [
-    line('Revision', `${summary.revision}${summary.created ? '  (new lineage)' : ''}`),
+    line(
+      'Revision',
+      `${summary.revision}${summary.created ? '  (new lineage)' : ''}${summary.nextProducer === null ? '  (final)' : ''}`,
+    ),
     line('Stamped', `SHA-256 ${HexConverter.encode(summary.digest)}`),
     line('Network', `${networkLabel(summary.networkId)} via ${summary.gatewayUrl}`),
     line('Signed by', HexConverter.encode(summary.signer)),
-    line('Next producer', HexConverter.encode(summary.nextProducer)),
+    line('Next producer', keyLabel(summary.nextProducer, FINALIZED_LABEL)),
     line('Certified at', `${formatIso(summary.referenceTime)}  (reference time ${summary.referenceTime})`),
     line('Round', `${summary.roundNumber}  (round timestamp ${summary.roundTimestamp}, epoch ${summary.epoch})`),
     line('Token id', HexConverter.encode(summary.tokenId)),
@@ -427,9 +434,10 @@ export function revisionJson(summary: IRevisionSummary): IRevisionJson {
   return {
     command: 'stamp-revision',
     created: summary.created,
+    finalized: summary.nextProducer === null,
     hash: { algorithm: 'SHA-256', digest: HexConverter.encode(summary.digest) },
     network: { gateway: summary.gatewayUrl, id: summary.networkId, name: networkName(summary.networkId) },
-    nextProducer: HexConverter.encode(summary.nextProducer),
+    nextProducer: summary.nextProducer === null ? null : HexConverter.encode(summary.nextProducer),
     referenceTime: summary.referenceTime.toString(),
     referenceTimeIso: toIso(summary.referenceTime),
     revision: summary.revision.toString(),
@@ -468,13 +476,17 @@ export interface ILineageRevisionJson {
   readonly referenceTime: string;
   readonly referenceTimeIso: string | null;
   readonly round: { readonly epoch: string; readonly number: string; readonly timestamp: string };
+  /** Whether the revision is a seal, the final revision of the lineage. */
+  readonly sealed: boolean;
   readonly signer: string | null;
 }
 
 export interface ILineageDescriptionJson {
+  /** Whether the latest revision is a seal, so that no revision can follow. */
+  readonly finalized: boolean;
   readonly issuer: string | null;
   readonly network: INetworkJson;
-  /** Who may sign the next revision: the latest revision's next producer. */
+  /** Who may sign the next revision: the latest revision's next producer; null when finalized. */
   readonly nextProducer: string | null;
   readonly revisions: ILineageRevisionJson[];
   readonly tokenId: string;
@@ -497,8 +509,17 @@ export interface ILineageInspectJson extends ILineageDescriptionJson {
   readonly verified: false;
 }
 
+const FINALIZED_LABEL = 'none; the lineage is finalized (sealed and burned)';
+
 function keyLabel(key: Uint8Array | null, otherwise: string): string {
   return key === null ? otherwise : HexConverter.encode(key);
+}
+
+function passesToLabel(revision: ILineageRevisionDescription): string {
+  if (revision.burnReason !== null) {
+    return revision.sealed ? 'nobody; sealed and burned' : 'burn predicate, but the revision is not a seal';
+  }
+  return keyLabel(revision.nextProducer, 'not a signature predicate');
 }
 
 function latestNextProducer(description: ILineageDescription): Uint8Array | null {
@@ -513,10 +534,10 @@ function lineageRevisionLines(revision: ILineageRevisionDescription, position: n
       `Revision ${position}`,
       revision.digest === null
         ? `unreadable (${revision.error ?? 'no revision payload'})`
-        : `SHA-256 ${HexConverter.encode(revision.digest)}${claimed}`,
+        : `SHA-256 ${HexConverter.encode(revision.digest)}${claimed}${revision.sealed ? '  (final)' : ''}`,
     ),
     line('  Signed by', keyLabel(revision.signer, 'not a signature predicate key')),
-    line('  Passes to', keyLabel(revision.nextProducer, 'not a signature predicate')),
+    line('  Passes to', passesToLabel(revision)),
     line('  Certified at', `${formatIso(revision.referenceTime)}  (reference time ${revision.referenceTime})`),
     line('  Round', `${revision.roundNumber}  (round timestamp ${revision.roundTimestamp}, epoch ${revision.epoch})`),
   ];
@@ -529,7 +550,10 @@ function lineageLines(description: ILineageDescription): string[] {
     line('Token id', HexConverter.encode(description.token.id.bytes)),
     line('Issuer', keyLabel(description.issuer, 'unreadable genesis reason')),
     line('Revisions', String(description.revisions.length)),
-    line('Next producer', keyLabel(latestNextProducer(description), 'not a signature predicate')),
+    line(
+      'Next producer',
+      keyLabel(latestNextProducer(description), description.finalized ? FINALIZED_LABEL : 'not a signature predicate'),
+    ),
   ];
   description.revisions.forEach((revision, position) => {
     lines.push('', ...lineageRevisionLines(revision, position));
@@ -552,7 +576,10 @@ function lineageExpectedHashLabel(result: ILineageVerificationResult): string {
     return 'differs from every revision';
   }
   const which = `matches revision${matching.length > 1 ? 's' : ''} ${matching.join(', ')}`;
-  return last === latest ? `${which} (the latest)` : `${which}; superseded by revision ${latest}`;
+  if (last !== latest) {
+    return `${which}; superseded by revision ${latest}`;
+  }
+  return `${which} (the ${result.description.finalized ? 'final' : 'latest'})`;
 }
 
 /**
@@ -603,6 +630,7 @@ function lineageRevisionJson(revision: ILineageRevisionDescription): ILineageRev
       number: revision.roundNumber.toString(),
       timestamp: revision.roundTimestamp.toString(),
     },
+    sealed: revision.sealed,
     signer: revision.signer === null ? null : HexConverter.encode(revision.signer),
   };
 }
@@ -615,6 +643,7 @@ export function lineageDescriptionJson(description: ILineageDescription): ILinea
   const networkId = description.token.networkId.id;
   const nextProducer = latestNextProducer(description);
   return {
+    finalized: description.finalized,
     issuer: description.issuer === null ? null : HexConverter.encode(description.issuer),
     network: { id: networkId, name: networkName(networkId) },
     nextProducer: nextProducer === null ? null : HexConverter.encode(nextProducer),

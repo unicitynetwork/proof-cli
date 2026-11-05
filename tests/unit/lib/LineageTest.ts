@@ -6,8 +6,10 @@ import type { IAggregatorClient } from '@unicitylabs/state-transition-sdk/lib/ap
 import { InclusionProofResponse } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProofResponse.js';
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
+import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
+import type { IPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/IPredicate.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
@@ -19,6 +21,7 @@ import {
   appendRevision,
   createLineage,
   currentProducerKey,
+  isFinalized,
   LineageError,
 } from '../../../src/lib/lineage/LineageClient.js';
 import {
@@ -28,6 +31,7 @@ import {
   LineageFormatError,
   LineageGenesisReason,
   LineageRevision,
+  sealPredicate,
 } from '../../../src/lib/lineage/LineagePayload.js';
 import { describeLineage, verifyLineage } from '../../../src/lib/lineage/LineageVerification.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
@@ -143,6 +147,114 @@ describe('document lineage', () => {
     ).rejects.toThrow();
   });
 
+  describe('finalization', () => {
+    it('seals the final revision and burns the token, so nothing can follow', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const sealed = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, null, fast);
+      const token = await Token.fromCBOR(sealed.toCBOR());
+      expect(isFinalized(token)).toBe(true);
+      expect(isFinalized(genesis)).toBe(false);
+      expect(currentProducerKey(token)).toBeNull();
+
+      const payload = token.transactions[0].data as Uint8Array;
+      const revision = LineageRevision.fromCBOR(payload);
+      expect(revision.sealed).toBe(true);
+      expect(revision.index).toBe(1n);
+      expect(revision.digest).toEqual(OTHER_DIGEST);
+      // The burn reason commits to the seal: P_burn(H(b_seal)).
+      expect(BurnPredicate.fromPredicate(token.transactions[0].recipient).reason).toEqual(
+        new Uint8Array(createHash('sha256').update(payload).digest()),
+      );
+
+      const result = await verifyLineage(token, trustBase, { expectedDigest: OTHER_DIGEST });
+      expect(result.reason).toBeNull();
+      expect(result.status).toEqual('OK');
+      expect(result.description.finalized).toBe(true);
+      expect(result.description.revisions.map((entry) => entry.sealed)).toEqual([false, true]);
+
+      const before = counting.submissions;
+      for (const key of [alice, bob, carol]) {
+        await expect(
+          appendRevision(client, trustBase, token, THIRD_DIGEST, key, publicKey(carol), fast),
+        ).rejects.toMatchObject({ code: 'FINALIZED' });
+      }
+      expect(counting.submissions).toBe(before);
+    });
+
+    it('finalizes a new lineage at revision 0', async () => {
+      const token = await createLineage(client, trustBase, TEST_DIGEST, alice, null, fast);
+      expect(isFinalized(token)).toBe(true);
+      const result = await verifyLineage(await Token.fromCBOR(token.toCBOR()), trustBase);
+      expect(result.reason).toBeNull();
+      expect(result.description.finalized).toBe(true);
+      expect(result.description.revisions[0].signer).toEqual(publicKey(alice));
+      await expect(
+        appendRevision(client, trustBase, token, OTHER_DIGEST, alice, publicKey(bob), fast),
+      ).rejects.toMatchObject({ code: 'FINALIZED' });
+    });
+
+    it('replays an interrupted seal identically', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const first = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, null, fast);
+      const again = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, null, fast);
+      expect(HexConverter.encode(again.toCBOR())).toEqual(HexConverter.encode(first.toCBOR()));
+    });
+
+    /** A genesis with a valid issuer signature over `data`, minted to `recipient`. */
+    async function signedGenesis(data: Uint8Array, recipient: IPredicate): Promise<Token> {
+      const salt = TokenSalt.generate();
+      const tokenId = await TokenId.fromSalt(trustBase.networkId, salt);
+      const reason = await LineageGenesisReason.sign(tokenId, LINEAGE_TOKEN_TYPE, data, new SigningService(alice));
+      const genesis = await certifyMint(aggregator, recipient, {
+        data,
+        justification: reason.toCBOR(),
+        salt,
+        tokenType: LINEAGE_TOKEN_TYPE,
+      });
+      return Token.fromCBOR(
+        CborSerializer.encodeTag(
+          Token.CBOR_TAG,
+          CborSerializer.encodeArray(
+            CborSerializer.encodeUnsignedInteger(2n),
+            genesis.toCBOR(),
+            CborSerializer.encodeArray(),
+          ),
+        ),
+      );
+    }
+
+    it('accepts a correctly formed seal at genesis', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST, true).toCBOR();
+      const result = await verifyLineage(await signedGenesis(data, await sealPredicate(data)), trustBase);
+      expect(result.reason).toBeNull();
+    });
+
+    it('rejects a seal that is not burned', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST, true).toCBOR();
+      const result = await verifyLineage(
+        await signedGenesis(data, SignaturePredicate.create(publicKey(bob))),
+        trustBase,
+      );
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Revision 0 is a seal, but is not burned.');
+    });
+
+    it('rejects a burn that is not a seal', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+      const result = await verifyLineage(await signedGenesis(data, await sealPredicate(data)), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Revision 0 is burned, but is not a seal.');
+    });
+
+    it('rejects a seal whose burn reason commits to something else', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST, true).toCBOR();
+      const other = LineageRevision.create(0n, OTHER_DIGEST, true).toCBOR();
+      const result = await verifyLineage(await signedGenesis(data, await sealPredicate(other)), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Revision 0 is a seal, but its burn reason does not commit to it.');
+    });
+  });
+
   describe('verification', () => {
     /** Mint a lineage-typed genesis with arbitrary fields and wrap it as a token, bypassing issuance checks. */
     async function rawLineageToken(options: {
@@ -233,6 +345,27 @@ describe('document lineage', () => {
       ).toThrow(LineageFormatError);
       const trailing = new Uint8Array([...LineageRevision.create(0n, TEST_DIGEST).toCBOR(), 0x00]);
       expect(() => LineageRevision.fromCBOR(trailing)).toThrow(LineageFormatError);
+    });
+
+    it('round-trips a seal and keeps it distinct from an ordinary revision', () => {
+      const seal = LineageRevision.create(3n, TEST_DIGEST, true);
+      const decoded = LineageRevision.fromCBOR(seal.toCBOR());
+      expect(decoded.sealed).toBe(true);
+      expect(decoded.index).toBe(3n);
+      expect(decoded.digest).toEqual(TEST_DIGEST);
+      expect(LineageRevision.fromCBOR(LineageRevision.create(3n, TEST_DIGEST).toCBOR()).sealed).toBe(false);
+      expect(HexConverter.encode(seal.toCBOR())).toEqual(
+        `8364${HexConverter.encode(new TextEncoder().encode('seal'))}035820${HexConverter.encode(TEST_DIGEST)}`,
+      );
+    });
+
+    it('rejects a three-element revision without the seal marker', () => {
+      const bogus = CborSerializer.encodeArray(
+        CborSerializer.encodeTextString('stop'),
+        CborSerializer.encodeUnsignedInteger(0n),
+        CborSerializer.encodeByteString(TEST_DIGEST),
+      );
+      expect(() => LineageRevision.fromCBOR(bogus)).toThrow(LineageFormatError);
     });
 
     it('round-trips a genesis reason and rejects a wrong tag', async () => {

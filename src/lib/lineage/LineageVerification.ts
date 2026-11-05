@@ -1,4 +1,5 @@
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
+import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import { PredicateVerifierService } from '@unicitylabs/state-transition-sdk/lib/predicate/verification/PredicateVerifierService.js';
@@ -21,6 +22,7 @@ import {
   LINEAGE_TOKEN_TYPE,
   LineageGenesisReason,
   LineageRevision,
+  sealPredicate,
 } from './LineagePayload.js';
 import { errorMessage } from '../errors.js';
 import { createUnicityCertificateVerifier } from '../verification.js';
@@ -41,7 +43,8 @@ function combine(rule: string, results: Result[]): Result {
  * auxiliary data and an issuer reason. The reason's signature is checked by
  * {@link LineageGenesisReasonVerifier}, which the SDK dispatches by CBOR tag; this
  * verifier only insists the reason is there, because the SDK accepts a mint with
- * no justification at all. The recipient may be any predicate.
+ * no justification at all. The recipient may be any predicate; that a seal is
+ * burned, and only a seal, is checked with the chain rules.
  */
 export class LineageIssuanceVerifier implements ITokenIssuanceVerifier {
   public static readonly RULE = 'LineageIssuanceVerification';
@@ -126,6 +129,11 @@ export function createLineageVerificationContext(trustBase: RootTrustBase): Veri
 
 /** One revision of a lineage as read off the token. */
 export interface ILineageRevisionDescription {
+  /**
+   * Burn reason when the revision's recipient is the burn predicate, which it must
+   * be exactly when the revision is a seal; null for any other predicate.
+   */
+  readonly burnReason: Uint8Array | null;
   readonly digest: Uint8Array | null;
   readonly epoch: bigint;
   readonly error: string | null;
@@ -137,6 +145,8 @@ export interface ILineageRevisionDescription {
   readonly roundNumber: bigint;
   /** Unix seconds; consensus-signed upper bound of the reference time. */
   readonly roundTimestamp: bigint;
+  /** Whether the payload marks this as the final revision; false when it does not decode. */
+  readonly sealed: boolean;
   /**
    * Who signed the revision as claimed by the token: the issuer named in the genesis
    * reason for revision 0, otherwise the producer the previous revision named. Null
@@ -147,6 +157,8 @@ export interface ILineageRevisionDescription {
 
 /** What a lineage token claims, without verifying it. */
 export interface ILineageDescription {
+  /** Whether the latest revision is a seal; the token's validity is not implied. */
+  readonly finalized: boolean;
   readonly issuer: Uint8Array | null;
   readonly revisions: readonly ILineageRevisionDescription[];
   readonly token: Token;
@@ -161,12 +173,21 @@ function signaturePredicateKey(predicate: EncodedPredicate): Uint8Array | null {
   }
 }
 
+function burnReason(predicate: EncodedPredicate): Uint8Array | null {
+  try {
+    return BurnPredicate.fromPredicate(predicate).reason;
+  } catch {
+    return null;
+  }
+}
+
 function describeRevision(
   transaction: CertifiedMintTransaction | CertifiedTransferTransaction,
   signer: Uint8Array | null,
 ): ILineageRevisionDescription {
   const certificate = transaction.inclusionProof.unicityCertificate;
   const common = {
+    burnReason: burnReason(transaction.recipient),
     epoch: certificate.unicitySeal.epoch,
     nextProducer: signaturePredicateKey(transaction.recipient),
     referenceTime: transaction.referenceTime,
@@ -175,13 +196,13 @@ function describeRevision(
     signer,
   };
   if (transaction.data === null) {
-    return { ...common, digest: null, error: 'no revision payload', index: null };
+    return { ...common, digest: null, error: 'no revision payload', index: null, sealed: false };
   }
   try {
     const revision = LineageRevision.fromCBOR(transaction.data);
-    return { ...common, digest: revision.digest, error: null, index: revision.index };
+    return { ...common, digest: revision.digest, error: null, index: revision.index, sealed: revision.sealed };
   } catch (error) {
-    return { ...common, digest: null, error: errorMessage(error), index: null };
+    return { ...common, digest: null, error: errorMessage(error), index: null, sealed: false };
   }
 }
 
@@ -205,6 +226,7 @@ export function describeLineage(token: Token): ILineageDescription {
     revisions.push(describeRevision(transaction, revisions[revisions.length - 1].nextProducer));
   }
   return {
+    finalized: revisions[revisions.length - 1].sealed,
     issuer,
     revisions,
     token,
@@ -231,18 +253,28 @@ export interface ILineageVerificationResult {
 }
 
 /**
- * Rules the SDK does not check, because they relate neighbouring transactions:
- * each revision's index is one more than the previous, and reference times never
- * decrease along the chain (the protocol does not imply this; states can be
- * precomputed and certified out of order).
+ * Rules the SDK does not check, because they relate neighbouring transactions
+ * or the lineage format: each revision's index is one more than the previous,
+ * reference times never decrease along the chain (the protocol does not imply
+ * this; states can be precomputed and certified out of order), and a revision is
+ * burned exactly when it is a seal, with the burn reason committing to the seal.
  */
-function chainRules(description: ILineageDescription): Result {
+async function chainRules(description: ILineageDescription): Promise<Result> {
   const results: Result[] = [];
-  description.revisions.forEach((revision, position) => {
+  const transactions = [description.token.genesis, ...description.token.transactions];
+  for (const [position, revision] of description.revisions.entries()) {
     if (revision.error !== null) {
       results.push(check(`Revision[${position}]Decodes`, false, `Revision ${position}: ${revision.error}`));
-      return;
+      continue;
     }
+    results.push(await sealRule(revision, position, transactions[position].data as Uint8Array));
+    results.push(
+      check(
+        `Revision[${position}]SealIsLast`,
+        !revision.sealed || position === description.revisions.length - 1,
+        `Revision ${position} is a seal, but revisions follow it.`,
+      ),
+    );
     results.push(
       check(
         `Revision[${position}]IndexSequential`,
@@ -260,8 +292,24 @@ function chainRules(description: ILineageDescription): Result {
         ),
       );
     }
-  });
+  }
   return combine('LineageChainVerification', results);
+}
+
+async function sealRule(revision: ILineageRevisionDescription, position: number, payload: Uint8Array): Promise<Result> {
+  const rule = `Revision[${position}]SealBurned`;
+  if (!revision.sealed) {
+    return check(rule, revision.burnReason === null, `Revision ${position} is burned, but is not a seal.`);
+  }
+  if (revision.burnReason === null) {
+    return check(rule, false, `Revision ${position} is a seal, but is not burned.`);
+  }
+  const expected = (await sealPredicate(payload)).reason;
+  return check(
+    rule,
+    areUint8ArraysEqual(revision.burnReason, expected),
+    `Revision ${position} is a seal, but its burn reason does not commit to it.`,
+  );
 }
 
 function deepestMessage(result: VerificationResult<unknown>): string {
@@ -312,7 +360,7 @@ export async function verifyLineage(
     };
   }
   const sdk = await token.verify(createLineageVerificationContext(trustBase));
-  const details = VerificationResult.fromResults('LineageTokenVerification', [sdk, chainRules(description)]);
+  const details = VerificationResult.fromResults('LineageTokenVerification', [sdk, await chainRules(description)]);
   if (details.status !== VerificationStatus.OK) {
     return { description, details, matchingRevisions: null, reason: deepestMessage(details), status: 'FAIL' };
   }

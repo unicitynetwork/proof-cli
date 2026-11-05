@@ -3,6 +3,7 @@ import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/Da
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { Signature } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/Signature.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
+import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
 import { CborDeserializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { TokenId } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenId.js';
@@ -61,16 +62,30 @@ function assertCanonical(input: Uint8Array, reencoded: Uint8Array, what: string)
   }
 }
 
+/** First element of a seal payload, marking the revision as final. */
+export const LINEAGE_SEAL_MARKER = 'seal';
+
 /**
- * Auxiliary data of every lineage transaction, `CBOR[i, H(doc_i)]`: the revision
- * index (0 at genesis, then one more per transfer) and the SHA-256 digest of that
- * revision. The document itself is never stored. No previous digest is needed;
- * linkage comes from the state hash chain.
+ * Auxiliary data of every lineage transaction: the revision index (0 at genesis,
+ * then one more per transfer) and the SHA-256 digest of that revision. The
+ * document itself is never stored. No previous digest is needed; linkage comes
+ * from the state hash chain.
+ *
+ * ```
+ * CBOR[i, H(doc_i)]            an ordinary revision
+ * CBOR["seal", i, H(doc_i)]    the final revision (seal)
+ * ```
+ *
+ * A seal is certified with the burn predicate `P_burn(H(b_seal))` as recipient,
+ * where `b_seal` is the seal payload itself, so no successor can ever exist and
+ * the burn commits to the final digest.
  */
 export class LineageRevision {
   private constructor(
     public readonly index: bigint,
     private readonly _digest: Uint8Array,
+    /** Whether this is the final revision, after which the token is burned. */
+    public readonly sealed: boolean,
   ) {
     this._digest = new Uint8Array(_digest);
   }
@@ -83,15 +98,16 @@ export class LineageRevision {
   /**
    * @param {bigint} index Revision index.
    * @param {Uint8Array} digest 32-byte SHA-256 digest.
+   * @param {boolean} sealed Whether this is the final revision.
    * @returns {LineageRevision} Revision payload.
    * @throws {LineageFormatError} If the digest is not 32 bytes or the index is negative.
    */
-  public static create(index: bigint, digest: Uint8Array): LineageRevision {
+  public static create(index: bigint, digest: Uint8Array, sealed = false): LineageRevision {
     if (index < 0n) {
       throw new LineageFormatError(`Revision index must not be negative, got ${index}.`);
     }
     assertDigest(digest);
-    return new LineageRevision(index, digest);
+    return new LineageRevision(index, digest, sealed);
   }
 
   /**
@@ -104,26 +120,50 @@ export class LineageRevision {
   public static fromCBOR(bytes: Uint8Array): LineageRevision {
     let index: bigint;
     let digest: Uint8Array;
+    let sealed: boolean;
     try {
-      const elements = CborDeserializer.decodeArray(bytes, 2);
+      const elements = CborDeserializer.decodeArray(bytes);
+      if (elements.length === 2) {
+        sealed = false;
+      } else if (elements.length === 3 && CborDeserializer.decodeTextString(elements[0]) === LINEAGE_SEAL_MARKER) {
+        sealed = true;
+        elements.shift();
+      } else {
+        throw new LineageFormatError('Unexpected revision payload shape.');
+      }
       index = CborDeserializer.decodeUnsignedInteger(elements[0]);
       digest = CborDeserializer.decodeByteString(elements[1]);
     } catch (error) {
-      throw new LineageFormatError('Revision payload is not a CBOR array of [index, digest].', { cause: error });
+      throw new LineageFormatError(
+        `Revision payload is not a CBOR array of [index, digest] or ["${LINEAGE_SEAL_MARKER}", index, digest].`,
+        { cause: error },
+      );
     }
     assertDigest(digest);
-    const revision = new LineageRevision(index, digest);
+    const revision = new LineageRevision(index, digest, sealed);
     assertCanonical(bytes, revision.toCBOR(), 'Revision payload');
     return revision;
   }
 
   /** @returns {Uint8Array} CBOR encoding. */
   public toCBOR(): Uint8Array {
-    return CborSerializer.encodeArray(
-      CborSerializer.encodeUnsignedInteger(this.index),
-      CborSerializer.encodeByteString(this._digest),
-    );
+    const fields = [CborSerializer.encodeUnsignedInteger(this.index), CborSerializer.encodeByteString(this._digest)];
+    return this.sealed
+      ? CborSerializer.encodeArray(CborSerializer.encodeTextString(LINEAGE_SEAL_MARKER), ...fields)
+      : CborSerializer.encodeArray(...fields);
   }
+}
+
+/**
+ * The predicate a sealed revision is certified to: `P_burn(H(b_seal))`, with the
+ * SHA-256 of the exact seal payload bytes as the burn reason.
+ *
+ * @param {Uint8Array} sealPayload CBOR of the sealed {@link LineageRevision}.
+ * @returns {Promise<BurnPredicate>} The burn predicate.
+ */
+export async function sealPredicate(sealPayload: Uint8Array): Promise<BurnPredicate> {
+  const hash = await new DataHasher(HashAlgorithm.SHA256).update(sealPayload).digest();
+  return BurnPredicate.create(hash.data);
 }
 
 /**

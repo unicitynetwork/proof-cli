@@ -445,6 +445,7 @@ export interface IStampRevisionFlags extends INetworkFlags {
   readonly allowInsecure?: boolean;
   readonly apiKey?: string;
   readonly file?: string;
+  readonly finalize?: boolean;
   readonly keyFile?: string;
   readonly recipientKey?: string;
   readonly recipientKeyFile?: string;
@@ -459,8 +460,11 @@ export interface IStampRevisionConfig {
   readonly network: ITimestampNetwork;
   /** Signs the new revision: the genesis reason for a new lineage, the transfer otherwise. */
   readonly privateKey: Uint8Array;
-  /** Compressed public key of whoever produces the following revision. */
-  readonly recipientKey: Uint8Array;
+  /**
+   * Compressed public key of whoever produces the following revision; null to
+   * finalize, sealing this revision as the last one.
+   */
+  readonly recipientKey: Uint8Array | null;
   readonly timeoutMs: number;
   /** Bytes of the existing token file, or null when a new lineage is to be created. */
   readonly tokenBytes: Uint8Array | null;
@@ -490,23 +494,43 @@ export function parsePublicKey(input: string, source = 'Recipient key'): Uint8Ar
   return key;
 }
 
-async function resolveRecipientKey(flags: IStampRevisionFlags): Promise<Uint8Array> {
-  if (flags.recipientKey !== undefined && flags.recipientKeyFile !== undefined) {
-    throw usageError('Pass either --recipient-key or --recipient-key-file, not both.');
+/**
+ * Exactly one of `--recipient-key`, `--recipient-key-file` and `--finalize`.
+ *
+ * @param {IStampRevisionFlags} flags Command-line flags.
+ * @returns {Promise<Uint8Array|null>} The next producer's key, or null to finalize.
+ */
+async function resolveRecipientKey(flags: IStampRevisionFlags): Promise<Uint8Array | null> {
+  const given = [
+    flags.recipientKey !== undefined ? '--recipient-key' : null,
+    flags.recipientKeyFile !== undefined ? '--recipient-key-file' : null,
+    flags.finalize === true ? '--finalize' : null,
+  ].filter((option) => option !== null);
+  if (given.length > 1) {
+    throw usageError(
+      `Pass only one of --recipient-key, --recipient-key-file and --finalize; got ${given.join(' and ')}.`,
+    );
+  }
+  if (given.length === 0) {
+    throw usageError(
+      'Name the producer of the next revision with --recipient-key or --recipient-key-file, ' +
+        'or pass --finalize to make this the final revision.',
+    );
+  }
+  if (flags.finalize === true) {
+    return null;
   }
   if (flags.recipientKey !== undefined) {
     return parsePublicKey(flags.recipientKey, '--recipient-key');
   }
-  if (flags.recipientKeyFile === undefined) {
-    throw usageError('Name the producer of the next revision: pass --recipient-key or --recipient-key-file.');
-  }
+  const recipientKeyFile = flags.recipientKeyFile as string;
   let contents: string;
   try {
-    contents = await readFile(flags.recipientKeyFile, 'utf8');
+    contents = await readFile(recipientKeyFile, 'utf8');
   } catch (error) {
-    throw usageError(`Cannot read recipient key file ${flags.recipientKeyFile}.`, { cause: error });
+    throw usageError(`Cannot read recipient key file ${recipientKeyFile}.`, { cause: error });
   }
-  return parsePublicKey(contents, `Recipient key file ${flags.recipientKeyFile}`);
+  return parsePublicKey(contents, `Recipient key file ${recipientKeyFile}`);
 }
 
 /**

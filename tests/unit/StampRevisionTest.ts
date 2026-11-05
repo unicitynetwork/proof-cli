@@ -46,7 +46,7 @@ describe('resolveStampRevisionConfig', () => {
     expect(config.tokenBytes).toBeNull();
     expect(config.digest).toEqual(TEST_DIGEST);
     expect(config.privateKey).toEqual(TEST_PRIVATE_KEY);
-    expect(HexConverter.encode(config.recipientKey)).toEqual(TEST_PUBLIC_KEY_HEX);
+    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
     expect(config.network.preset).toEqual('mainnet');
   });
 
@@ -57,7 +57,16 @@ describe('resolveStampRevisionConfig', () => {
     await writeFile(recipientKeyFile, ` ${TEST_PUBLIC_KEY_HEX.toUpperCase()}\n`);
     const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, { keyFile, recipientKeyFile, tokenFile }, ENV);
     expect(config.tokenBytes).toEqual(new TextEncoder().encode('abcd'));
-    expect(HexConverter.encode(config.recipientKey)).toEqual(TEST_PUBLIC_KEY_HEX);
+    expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
+  });
+
+  it('resolves --finalize to no next producer', async () => {
+    const config = await resolveStampRevisionConfig(
+      TEST_DIGEST_HEX,
+      { ...base(), finalize: true, recipientKey: undefined },
+      ENV,
+    );
+    expect(config.recipientKey).toBeNull();
   });
 
   it.each([
@@ -65,12 +74,35 @@ describe('resolveStampRevisionConfig', () => {
     ['both digest sources', TEST_DIGEST_HEX, { file: 'x' }, 'Pass either a digest or --file, not both.'],
     ['no token file', TEST_DIGEST_HEX, { tokenFile: undefined }, /--token-file/],
     ['no key file', TEST_DIGEST_HEX, { keyFile: undefined }, /--key-file/],
-    ['no recipient', TEST_DIGEST_HEX, { recipientKey: undefined }, /--recipient-key or --recipient-key-file/],
+    [
+      'no recipient',
+      TEST_DIGEST_HEX,
+      { recipientKey: undefined },
+      /--recipient-key or --recipient-key-file, or pass --finalize/,
+    ],
     [
       'both recipients',
       TEST_DIGEST_HEX,
       { recipientKeyFile: 'x' },
-      'Pass either --recipient-key or --recipient-key-file, not both.',
+      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --recipient-key-file.',
+    ],
+    [
+      'a recipient and --finalize',
+      TEST_DIGEST_HEX,
+      { finalize: true },
+      'Pass only one of --recipient-key, --recipient-key-file and --finalize; got --recipient-key and --finalize.',
+    ],
+    [
+      'a recipient file and --finalize',
+      TEST_DIGEST_HEX,
+      { finalize: true, recipientKey: undefined, recipientKeyFile: 'x' },
+      /got --recipient-key-file and --finalize/,
+    ],
+    [
+      'all three',
+      TEST_DIGEST_HEX,
+      { finalize: true, recipientKeyFile: 'x' },
+      /got --recipient-key and --recipient-key-file and --finalize/,
     ],
     ['a malformed recipient', TEST_DIGEST_HEX, { recipientKey: '04abcd' }, /compressed secp256k1 public key/],
     [
@@ -168,6 +200,48 @@ describe('stampRevisionWith', () => {
     const token = await Token.fromCBOR(new Uint8Array(await readFile(tokenFile)));
     expect(token.transactions).toHaveLength(1);
     expect((await verifyLineage(token, aggregator.rootTrustBase)).status).toEqual('OK');
+  });
+
+  it('finalizes a lineage, after which nothing can be appended', async () => {
+    const tokenFile = path.join(directory, 'doc.lineage');
+    await stampRevisionWith(config({}), client, testContext().context);
+    const tokenBytes = new Uint8Array(await readFile(tokenFile));
+
+    const sealed = testContext({ json: true });
+    expect(
+      await stampRevisionWith(
+        config({ digest: OTHER_DIGEST, privateKey: bob, recipientKey: null, tokenBytes }),
+        client,
+        sealed.context,
+      ),
+    ).toBe(0);
+    expect(sealed.json()).toMatchObject({ finalized: true, nextProducer: null, revision: '1' });
+
+    const text = testContext();
+    const finalBytes = new Uint8Array(await readFile(tokenFile));
+    expect(
+      await stampRevisionWith(
+        config({ digest: OTHER_DIGEST, privateKey: bob, recipientKey: null, tokenBytes }),
+        client,
+        text.context,
+      ),
+    ).toBe(0);
+    expect(text.stdout()).toContain('Revision       1  (final)\n');
+    expect(text.stdout()).toContain('Next producer  none; the lineage is finalized');
+
+    const attempt = stampRevisionWith(
+      config({ privateKey: bob, tokenBytes: finalBytes }),
+      client,
+      testContext().context,
+    );
+    await expect(attempt).rejects.toThrow(/finalized/);
+    expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+  });
+
+  it('creates a lineage that is final from the start', async () => {
+    const sink = testContext({ json: true });
+    expect(await stampRevisionWith(config({ recipientKey: null }), client, sink.context)).toBe(0);
+    expect(sink.json()).toMatchObject({ created: true, finalized: true, nextProducer: null, revision: '0' });
   });
 
   it('accepts a token file holding hex text', async () => {

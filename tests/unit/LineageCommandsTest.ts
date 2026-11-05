@@ -70,6 +70,44 @@ describe('verify and inspect on a document lineage', () => {
     await writeFile(trustBaseFile, JSON.stringify(aggregator.rootTrustBase.toJSON()));
   });
 
+  it('verifies a finalized lineage and says so', async () => {
+    const sealed = await appendRevision(
+      client,
+      aggregator.rootTrustBase,
+      token,
+      HexConverter.decode('cd'.repeat(32)),
+      bob,
+      null,
+      fast,
+    );
+    const sealedFile = path.join(directory, 'sealed.lineage');
+    await writeFile(sealedFile, sealed.toCBOR());
+
+    const sink = testContext();
+    expect(await runVerify(sealedFile, { hash: 'cd'.repeat(32), trustBase: trustBaseFile }, sink.context)).toBe(
+      EXIT_OK,
+    );
+    const out = sink.stdout();
+    expect(out).toContain('Next producer  none; the lineage is finalized (sealed and burned)\n');
+    expect(out).toContain(`Revision 3     SHA-256 ${'cd'.repeat(32)}  (final)\n  Signed by    ${bobPublicHex}\n`);
+    expect(out).toContain('  Passes to    nobody; sealed and burned\n');
+    expect(out).toContain('Expected hash  matches revision 3 (the final)');
+
+    const json = testContext({ json: true });
+    expect(await runVerify(sealedFile, { trustBase: trustBaseFile }, json.context)).toBe(EXIT_OK);
+    expect(json.json()).toMatchObject({ finalized: true, nextProducer: null, status: 'OK' });
+    expect((json.json() as { revisions: { sealed: boolean }[] }).revisions.map((entry) => entry.sealed)).toEqual([
+      false,
+      false,
+      false,
+      true,
+    ]);
+
+    const inspected = testContext({ json: true });
+    expect(await runInspect(sealedFile, inspected.context)).toBe(EXIT_OK);
+    expect(inspected.json()).toMatchObject({ finalized: true, verified: false });
+  });
+
   it('verifies the lineage and lists every revision', async () => {
     const sink = testContext();
     expect(await runVerify(tokenFile, { trustBase: trustBaseFile }, sink.context)).toBe(EXIT_OK);

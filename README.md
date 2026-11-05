@@ -116,18 +116,21 @@ The signer's compressed public key is printed on every `stamp` and `verify`, as 
 
 `stamp-revision` links successive revisions of a document in one *lineage token*
 (design: [#13](https://github.com/unicitynetwork/proof-cli/issues/13#issuecomment-6440959902)).
-Each call certifies one revision and names who may produce the next:
+Each call certifies one revision and either names who may produce the next, or finalizes the document:
 
 ```bash
 # Revision 0: creates doc.lineage, signed by alice, and names bob as the next producer.
 unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file alice.key --recipient-key <bob's public key>
 # Revision 1: only bob's key can append; bob names carol (key read from a file holding 66 hex characters).
 unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file bob.key --recipient-key-file carol.pub
+# Revision 2: carol finalizes the document; no revision can follow.
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file carol.key --finalize
 ```
 
-- Exactly one of `<sha256-hex>` and `--file`, and exactly one of `--recipient-key` and `--recipient-key-file`, is required. `--token-file` and `--key-file` are always required; `UNICITY_PRIVATE_KEY` is not consulted.
+- Exactly one of `<sha256-hex>` and `--file`, and exactly one of `--recipient-key`, `--recipient-key-file` and `--finalize`, is required. `--token-file` and `--key-file` are always required; `UNICITY_PRIVATE_KEY` is not consulted.
 - If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type and revision, which is what makes the origin "accepted"; the salt is random, so the token id cannot be predicted before the genesis is certified.
 - If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. The file is replaced atomically, and on any write failure the full token is printed as hex.
+- `--finalize` makes this revision the final one, a *seal*: its auxiliary data is `CBOR["seal", i, SHA-256(doc_i)]` and its recipient is the burn predicate `P_burn(SHA-256(auxiliary data))`, which no key can unlock. Appending to a finalized lineage fails before contacting the gateway (exit 2). On a new lineage, `--finalize` mints revision 0 as a seal: a single-revision document that is final from the start.
 - The state mask of each step is derived from the producer's key and the spent state, so if the command is interrupted after certification, running the same command again with the same file, key, digest and recipient recovers the same revision.
 - Network options behave as for `stamp`.
 
@@ -157,9 +160,9 @@ Revision 0     SHA-256 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e730433629
 …
 ```
 
-With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision. In `--json` output a lineage has `"tokenType": "lineage"`, a `revisions` array and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
+With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision, or `none; the lineage is finalized` after a seal, which is marked `(final)`. In `--json` output a lineage has `"tokenType": "lineage"`, `finalized`, a `revisions` array (each with `sealed`) and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
 
-Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, auxiliary data])`. Verification additionally requires the indices to increase by one and the reference times not to decrease along the chain.
+Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer, or `CBOR["seal", i, SHA-256(doc_i)]` on the final revision, whose recipient is then the burn predicate with reason `SHA-256(auxiliary data)`; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, auxiliary data])`. Verification additionally requires the indices to increase by one, the reference times not to decrease along the chain, and a revision to be burned exactly when it is a seal, with the burn reason as above.
 
 ### Verify
 
