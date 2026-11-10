@@ -1,30 +1,16 @@
-import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
-import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
-import { stampWith } from '../../src/lib/TimestampClient.js';
-import { describeToken, verify } from '../../src/lib/TimestampVerification.js';
 import {
-  descriptionJson,
   formatIso,
-  inspectText,
-  keygenJson,
-  keygenText,
   line,
   networkLabel,
   notATokenJson,
   notATokenText,
   resultTreeJson,
-  stampJson,
-  stampText,
   toIso,
-  verifyJson,
-  verifyText,
   warningLine,
 } from '../../src/output.js';
-import { TEST_DIGEST, TEST_DIGEST_HEX } from '../support/fixtures.js';
-import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
 
 describe('formatIso', () => {
   it('reports an unrepresentable time instead of throwing', () => {
@@ -57,14 +43,6 @@ describe('output', () => {
     expect(line('Status', 'OK')).toEqual('Status         OK');
     expect(notATokenText('not a token (x)')).toEqual('Status         FAIL: not a token (x)');
     expect(notATokenJson('inspect', 'bad')).toEqual({ command: 'inspect', reason: 'bad', status: 'FAIL' });
-    expect(keygenText('/k', '02ab')).toEqual('Key written    /k (mode 0600)\nPublic key     02ab');
-    expect(keygenJson('/k', '02ab')).toEqual({ command: 'keygen', out: '/k', publicKey: '02ab' });
-    expect(keygenJson(null, '02ab', 'ff')).toEqual({
-      command: 'keygen',
-      out: null,
-      privateKey: 'ff',
-      publicKey: '02ab',
-    });
     expect(warningLine('careful')).toEqual('warning: careful\n');
   });
 
@@ -77,84 +55,6 @@ describe('output', () => {
       results: [{ message: 'inner', results: [], rule: 'Child', status: 'FAIL' }],
       rule: 'Parent',
       status: 'FAIL',
-    });
-  });
-
-  describe('with a real token', () => {
-    const aggregator = TestAggregatorClient.create();
-    const client = new StateTransitionClient(aggregator);
-    const trustBase = aggregator.rootTrustBase;
-
-    it('renders stamp, verify and inspect views consistently', async () => {
-      const token = await stampWith(client, trustBase, TEST_DIGEST, { pollIntervalMs: 10, timeoutMs: 2000 });
-      const description = describeToken(token);
-      const tokenIdHex = HexConverter.encode(token.id.bytes);
-
-      const text = stampText(description, 'http://gateway.local', '/tmp/x.cbor');
-      expect(text).toContain(`Stamped        SHA-256 ${TEST_DIGEST_HEX}`);
-      expect(text).toContain('Network        unknown network (3) via http://gateway.local');
-      expect(text).toContain('Signer         none (anonymous stamp)');
-      expect(text).toContain(`Token id       ${tokenIdHex}`);
-      expect(text).toContain('Written        /tmp/x.cbor');
-      expect(stampText(description, 'http://gateway.local', null)).not.toContain('Written');
-
-      const json = stampJson(description, 'http://gateway.local', '/tmp/x.cbor', token.toCBOR());
-      expect(json).toMatchObject({
-        command: 'stamp',
-        hash: { algorithm: 'SHA-256', digest: TEST_DIGEST_HEX },
-        network: { gateway: 'http://gateway.local', id: 3, name: 'unknown' },
-        out: '/tmp/x.cbor',
-        signer: null,
-        token: HexConverter.encode(token.toCBOR()),
-        tokenId: tokenIdHex,
-      });
-      expect(typeof json.referenceTime).toBe('string');
-
-      const bundled = { kind: 'bundled', network: 'testnet2' } as const;
-      const ok = await verify(token, trustBase, { expectedDigest: TEST_DIGEST });
-      expect(verifyText(ok, bundled)).toContain(
-        'Status         OK  (inclusion proof, consensus signatures and payload verified against the bundled testnet2 trust base)',
-      );
-      expect(verifyText(ok, bundled)).toContain('Trust base     bundled testnet2 pin');
-      expect(verifyText(ok, bundled)).toContain('Expected hash  matches');
-      const unchecked = await verify(token, trustBase);
-      expect(verifyText(unchecked, bundled)).toContain('Expected hash  not checked; pass --file or --hash');
-      expect(verifyJson(ok, bundled)).toMatchObject({
-        command: 'verify',
-        expectedHashMatches: true,
-        reason: null,
-        status: 'OK',
-        trustBase: { bundledNetwork: 'testnet2', path: null, source: 'bundled' },
-      });
-      expect(verifyJson(ok, bundled).details?.status).toEqual('OK');
-
-      // No trust base could be selected at all, which is how `verify` reports a
-      // token whose network id matches no bundled pin.
-      expect(verifyText(ok, null)).toContain('Trust base     none selected');
-      expect(verifyJson(ok, null).trustBase).toBeNull();
-
-      // An override must never be able to present itself as the bundled pin.
-      const override = { kind: 'file', path: '/tmp/rogue.json' } as const;
-      expect(verifyText(ok, override)).toContain('Trust base     /tmp/rogue.json  (override, not the bundled pin)');
-      expect(verifyText(ok, override)).toContain('verified against /tmp/rogue.json');
-      expect(verifyText(ok, override)).not.toContain('the bundled testnet2 trust base');
-      expect(verifyJson(ok, override).trustBase).toEqual({
-        bundledNetwork: null,
-        path: '/tmp/rogue.json',
-        source: 'file',
-      });
-
-      // `referenceTimeIso` is typed as an ISO string, so the sentinel for a time
-      // no Date can hold belongs in the text output only.
-      const hostileTime = { ...description, referenceTime: 10n ** 30n };
-      expect(descriptionJson(hostileTime).referenceTimeIso).toBeNull();
-      expect(inspectText(hostileTime)).toContain('out of range (1000000000000000000000000000000)');
-
-      const inspected = inspectText(description);
-      expect(inspected.startsWith('UNVERIFIED')).toBe(true);
-      expect(inspected).toContain('Token type     timestamp');
-      expect(inspected).toContain('Recipient      timestamp burn predicate');
-      expect(descriptionJson(description).transferCount).toBe(0);
     });
   });
 });

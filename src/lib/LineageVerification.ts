@@ -1,0 +1,417 @@
+import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
+import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
+import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
+import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
+import { PredicateVerifierService } from '@unicitylabs/state-transition-sdk/lib/predicate/verification/PredicateVerifierService.js';
+import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
+import { CertifiedTransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedTransferTransaction.js';
+import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import { TokenType } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenType.js';
+import type { IMintJustificationVerifier } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/IMintJustificationVerifier.js';
+import type { ITokenIssuanceVerifier } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/ITokenIssuanceVerifier.js';
+import { MintJustificationVerifierService } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/MintJustificationVerifierService.js';
+import { TokenIssuanceVerifierService } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/TokenIssuanceVerifierService.js';
+import { VerificationContext } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/VerificationContext.js';
+import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
+import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/TypedArrayUtils.js';
+import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
+import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
+
+import { errorMessage } from './errors.js';
+import {
+  LINEAGE_GENESIS_REASON_TAG,
+  LINEAGE_TOKEN_TYPE,
+  LineageGenesisReason,
+  LineageRevision,
+  sealPredicate,
+} from './LineagePayload.js';
+import { createUnicityCertificateVerifier } from './verification.js';
+
+type Result = VerificationResult<VerificationStatus>;
+
+function check(rule: string, ok: boolean, failureMessage: string): Result {
+  return new VerificationResult(rule, ok ? VerificationStatus.OK : VerificationStatus.FAIL, ok ? '' : failureMessage);
+}
+
+function combine(rule: string, results: Result[]): Result {
+  const firstFailure = results.find((result) => result.status !== VerificationStatus.OK);
+  return VerificationResult.fromResults(rule, results, firstFailure?.message ?? '');
+}
+
+/**
+ * Issuance policy for `DOC_LINEAGE` tokens: the genesis carries revision 0 as its
+ * auxiliary data and an issuer reason. The reason's signature is checked by
+ * {@link LineageGenesisReasonVerifier}, which the SDK dispatches by CBOR tag; this
+ * verifier only insists the reason is there, because the SDK accepts a mint with
+ * no justification at all. The recipient may be any predicate; that a seal is
+ * burned, and only a seal, is checked with the chain rules.
+ */
+export class LineageIssuanceVerifier implements ITokenIssuanceVerifier {
+  public static readonly RULE = 'LineageIssuanceVerification';
+
+  /** @returns {TokenType} The document lineage token type. */
+  public get tokenType(): TokenType {
+    return LINEAGE_TOKEN_TYPE;
+  }
+
+  /** @inheritDoc */
+  public verify(transaction: CertifiedMintTransaction): Promise<Result> {
+    const results: Result[] = [];
+    try {
+      results.push(
+        check('GenesisReasonPresent', transaction.justification !== null, 'Lineage genesis carries no issuer reason.'),
+      );
+      const data = transaction.data;
+      if (data === null) {
+        results.push(check('RevisionPresent', false, 'Lineage genesis carries no revision payload.'));
+      } else {
+        const revision = LineageRevision.fromCBOR(data);
+        results.push(check('RevisionDecodes', true, ''));
+        results.push(
+          check('GenesisRevisionIsZero', revision.index === 0n, `Genesis revision index is ${revision.index}, not 0.`),
+        );
+      }
+    } catch (error) {
+      results.push(check('RevisionDecodes', false, errorMessage(error)));
+    }
+    return Promise.resolve(combine(LineageIssuanceVerifier.RULE, results));
+  }
+}
+
+/** Checks the issuer signature in a lineage genesis reason, over the mint's own id, type, recipient and auxData. */
+export class LineageGenesisReasonVerifier implements IMintJustificationVerifier {
+  public static readonly RULE = 'LineageGenesisReasonVerification';
+
+  /** @returns {bigint} CBOR tag of the lineage genesis reason. */
+  public get tag(): bigint {
+    return LINEAGE_GENESIS_REASON_TAG;
+  }
+
+  /** @inheritDoc */
+  public async verify(transaction: CertifiedMintTransaction): Promise<Result> {
+    const results: Result[] = [];
+    try {
+      if (!areUint8ArraysEqual(transaction.tokenType.bytes, LINEAGE_TOKEN_TYPE.bytes)) {
+        results.push(check('TokenTypeIsLineage', false, 'A lineage genesis reason on a token of another type.'));
+      } else {
+        const reason = LineageGenesisReason.fromCBOR(transaction.justification as Uint8Array);
+        const data = transaction.data ?? new Uint8Array();
+        results.push(
+          check(
+            'IssuerSignatureValid',
+            await reason.verify(transaction.tokenId, transaction.tokenType, transaction.recipient, data),
+            'Issuer signature in the genesis reason does not verify.',
+          ),
+        );
+      }
+    } catch (error) {
+      results.push(check('GenesisReasonDecodes', false, errorMessage(error)));
+    }
+    return combine(LineageGenesisReasonVerifier.RULE, results);
+  }
+}
+
+/**
+ * Verification context that accepts document lineage tokens and nothing else.
+ *
+ * @param {RootTrustBase} trustBase Trust base of the network the token belongs to.
+ * @returns {VerificationContext} Context for `token.verify`, `Token.mint` and `token.transfer`.
+ */
+export function createLineageVerificationContext(trustBase: RootTrustBase): VerificationContext {
+  return new VerificationContext(
+    trustBase,
+    PredicateVerifierService.create(),
+    createUnicityCertificateVerifier(),
+    new MintJustificationVerifierService().register(new LineageGenesisReasonVerifier()),
+    new TokenIssuanceVerifierService(true).register(new LineageIssuanceVerifier()),
+  );
+}
+
+/** One revision of a lineage as read off the token. */
+export interface ILineageRevisionDescription {
+  /**
+   * Burn reason when the revision's recipient is the burn predicate, which it must
+   * be exactly when the revision is a seal; null for any other predicate.
+   */
+  readonly burnReason: Uint8Array | null;
+  readonly digest: Uint8Array | null;
+  readonly epoch: bigint;
+  readonly error: string | null;
+  readonly index: bigint | null;
+  /** Public key of the `P_sig` the revision names as producer of the next one; null for any other predicate. */
+  readonly nextProducer: Uint8Array | null;
+  /** Unix seconds. */
+  readonly referenceTime: bigint;
+  readonly roundNumber: bigint;
+  /** Unix seconds; consensus-signed upper bound of the reference time. */
+  readonly roundTimestamp: bigint;
+  /** Whether the payload marks this as the final revision; false when it does not decode. */
+  readonly sealed: boolean;
+  /**
+   * Who signed the revision as claimed by the token: the issuer named in the genesis
+   * reason for revision 0, otherwise the producer the previous revision named. Null
+   * when that is not a readable `P_sig` key.
+   */
+  readonly signer: Uint8Array | null;
+}
+
+/** What a lineage token claims, without verifying it. */
+export interface ILineageDescription {
+  /** Whether the latest revision is a seal; the token's validity is not implied. */
+  readonly finalized: boolean;
+  readonly issuer: Uint8Array | null;
+  readonly revisions: readonly ILineageRevisionDescription[];
+  readonly token: Token;
+  readonly tokenTypeIsLineage: boolean;
+}
+
+function signaturePredicateKey(predicate: EncodedPredicate): Uint8Array | null {
+  try {
+    return SignaturePredicate.fromPredicate(predicate).publicKey;
+  } catch {
+    return null;
+  }
+}
+
+function burnReason(predicate: EncodedPredicate): Uint8Array | null {
+  try {
+    return BurnPredicate.fromPredicate(predicate).reason;
+  } catch {
+    return null;
+  }
+}
+
+function describeRevision(
+  transaction: CertifiedMintTransaction | CertifiedTransferTransaction,
+  signer: Uint8Array | null,
+): ILineageRevisionDescription {
+  const certificate = transaction.inclusionProof.unicityCertificate;
+  const common = {
+    burnReason: burnReason(transaction.recipient),
+    epoch: certificate.unicitySeal.epoch,
+    nextProducer: signaturePredicateKey(transaction.recipient),
+    referenceTime: transaction.referenceTime,
+    roundNumber: certificate.inputRecord.roundNumber,
+    roundTimestamp: certificate.inputRecord.timestamp,
+    signer,
+  };
+  if (transaction.data === null) {
+    return { ...common, digest: null, error: 'no revision payload', index: null, sealed: false };
+  }
+  try {
+    const revision = LineageRevision.fromCBOR(transaction.data);
+    return { ...common, digest: revision.digest, error: null, index: revision.index, sealed: revision.sealed };
+  } catch (error) {
+    return { ...common, digest: null, error: errorMessage(error), index: null, sealed: false };
+  }
+}
+
+/**
+ * Read the lineage fields off a token without verifying anything.
+ *
+ * @param {Token} token Any SDK token.
+ * @returns {ILineageDescription} What the token claims.
+ */
+export function describeLineage(token: Token): ILineageDescription {
+  let issuer: Uint8Array | null = null;
+  if (token.genesis.justification !== null) {
+    try {
+      issuer = LineageGenesisReason.fromCBOR(token.genesis.justification).issuer;
+    } catch {
+      issuer = null;
+    }
+  }
+  const revisions = [describeRevision(token.genesis, issuer)];
+  for (const transaction of token.transactions) {
+    revisions.push(describeRevision(transaction, revisions[revisions.length - 1].nextProducer));
+  }
+  return {
+    finalized: revisions[revisions.length - 1].sealed,
+    issuer,
+    revisions,
+    token,
+    tokenTypeIsLineage: areUint8ArraysEqual(token.type.bytes, LINEAGE_TOKEN_TYPE.bytes),
+  };
+}
+
+export interface ILineageVerifyOptions {
+  /** Digest one of the revisions is expected to carry. */
+  readonly expectedDigest?: Uint8Array;
+  /**
+   * Token id the lineage is expected to have. Only the id identifies a lineage:
+   * one issuer can start any number of certified lineages from the same initial
+   * revision, and nothing else tells them apart. Verifiers should receive it
+   * through a trusted channel when the lineage is created.
+   */
+  readonly expectedTokenId?: Uint8Array;
+}
+
+export interface ILineageVerificationResult {
+  readonly description: ILineageDescription;
+  /** SDK result tree, or null when it was not reached. */
+  readonly details: Result | null;
+  /**
+   * Positions of the revisions that carry the expected digest; null when no digest
+   * was given or the comparison was not reached. Empty means a mismatch.
+   */
+  readonly matchingRevisions: readonly number[] | null;
+  readonly reason: string | null;
+  readonly status: 'FAIL' | 'OK';
+  /**
+   * Whether the token id is the expected one; null when no id was given or the
+   * comparison was not reached.
+   */
+  readonly tokenIdMatches: boolean | null;
+}
+
+/**
+ * Rules the SDK does not check, because they relate neighbouring transactions
+ * or the lineage format: each revision's index is one more than the previous,
+ * reference times never decrease along the chain (the protocol does not imply
+ * this; states can be precomputed and certified out of order), and a revision is
+ * burned exactly when it is a seal, with the burn reason committing to the seal.
+ */
+async function chainRules(description: ILineageDescription): Promise<Result> {
+  const results: Result[] = [];
+  const transactions = [description.token.genesis, ...description.token.transactions];
+  for (const [position, revision] of description.revisions.entries()) {
+    if (revision.error !== null) {
+      results.push(check(`Revision[${position}]Decodes`, false, `Revision ${position}: ${revision.error}`));
+      continue;
+    }
+    results.push(await sealRule(revision, position, transactions[position].data as Uint8Array));
+    results.push(
+      check(
+        `Revision[${position}]SealIsLast`,
+        !revision.sealed || position === description.revisions.length - 1,
+        `Revision ${position} is a seal, but revisions follow it.`,
+      ),
+    );
+    results.push(
+      check(
+        `Revision[${position}]IndexSequential`,
+        revision.index === BigInt(position),
+        `Revision at position ${position} claims index ${revision.index}.`,
+      ),
+    );
+    const previous = description.revisions[position - 1];
+    if (previous !== undefined) {
+      results.push(
+        check(
+          `Revision[${position}]TimeMonotone`,
+          revision.referenceTime >= previous.referenceTime,
+          `Revision ${position} is certified at ${revision.referenceTime}, before revision ${position - 1} at ${previous.referenceTime}.`,
+        ),
+      );
+    }
+  }
+  return combine('LineageChainVerification', results);
+}
+
+async function sealRule(revision: ILineageRevisionDescription, position: number, payload: Uint8Array): Promise<Result> {
+  const rule = `Revision[${position}]SealBurned`;
+  if (!revision.sealed) {
+    return check(rule, revision.burnReason === null, `Revision ${position} is burned, but is not a seal.`);
+  }
+  if (revision.burnReason === null) {
+    return check(rule, false, `Revision ${position} is a seal, but is not burned.`);
+  }
+  const expected = (await sealPredicate(payload)).reason;
+  return check(
+    rule,
+    areUint8ArraysEqual(revision.burnReason, expected),
+    `Revision ${position} is a seal, but its burn reason does not commit to it.`,
+  );
+}
+
+function deepestMessage(result: VerificationResult<unknown>): string {
+  if (result.status === VerificationStatus.OK) {
+    return '';
+  }
+  for (const child of result.results) {
+    const message = deepestMessage(child);
+    if (message !== '') {
+      return message;
+    }
+  }
+  return result.message !== '' ? result.message : `Verification rule ${result.rule} failed.`;
+}
+
+/**
+ * Verify a document lineage token offline: the SDK's full token verification with
+ * the lineage issuance policy, then the chain rules, then, if asked, whether the
+ * token id is the expected one and whether any revision carries the expected
+ * digest. Without an expected token id, an OK result does not say which lineage
+ * this is: see {@link ILineageVerifyOptions.expectedTokenId}.
+ *
+ * @param {Token} token Token to verify.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {ILineageVerifyOptions} options Expected token id and digest.
+ * @returns {Promise<ILineageVerificationResult>} Outcome.
+ */
+export async function verifyLineage(
+  token: Token,
+  trustBase: RootTrustBase,
+  options: ILineageVerifyOptions = {},
+): Promise<ILineageVerificationResult> {
+  const description = describeLineage(token);
+  if (!description.tokenTypeIsLineage) {
+    return {
+      description,
+      details: null,
+      matchingRevisions: null,
+      reason: `Not a document lineage token: token type ${HexConverter.encode(token.type.bytes)}.`,
+      status: 'FAIL',
+      tokenIdMatches: null,
+    };
+  }
+  if (token.networkId.id !== trustBase.networkId.id) {
+    return {
+      description,
+      details: null,
+      matchingRevisions: null,
+      reason: `The token is for network ${token.networkId.id} and the trust base for network ${trustBase.networkId.id}.`,
+      status: 'FAIL',
+      tokenIdMatches: null,
+    };
+  }
+  const sdk = await token.verify(createLineageVerificationContext(trustBase));
+  const details = VerificationResult.fromResults('LineageTokenVerification', [sdk, await chainRules(description)]);
+  if (details.status !== VerificationStatus.OK) {
+    return {
+      description,
+      details,
+      matchingRevisions: null,
+      reason: deepestMessage(details),
+      status: 'FAIL',
+      tokenIdMatches: null,
+    };
+  }
+
+  const expectedId = options.expectedTokenId;
+  const tokenIdMatches = expectedId === undefined ? null : areUint8ArraysEqual(token.id.bytes, expectedId);
+  const expected = options.expectedDigest;
+  // Every digest decoded: the chain rules above fail on any revision that does not.
+  const matchingRevisions =
+    expected === undefined
+      ? null
+      : description.revisions.flatMap((revision, position) =>
+          revision.digest !== null && areUint8ArraysEqual(revision.digest, expected) ? [position] : [],
+        );
+
+  // The wrong lineage is reported first: which revision of it matches is beside the point.
+  let reason: string | null = null;
+  if (tokenIdMatches === false) {
+    reason = 'Token id mismatch: this is not the lineage you were given.';
+  } else if (matchingRevisions?.length === 0) {
+    reason = 'Hash mismatch: no revision of the lineage certifies this digest.';
+  }
+  return {
+    description,
+    details,
+    matchingRevisions,
+    reason,
+    status: reason === null ? 'OK' : 'FAIL',
+    tokenIdMatches,
+  };
+}

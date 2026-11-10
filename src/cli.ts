@@ -5,8 +5,9 @@ import { ICommandContext } from './commands/context.js';
 import { runInspect } from './commands/inspect.js';
 import { IKeygenFlags, runKeygen } from './commands/keygen.js';
 import { runStamp } from './commands/stamp.js';
+import { runStampRevision } from './commands/stampRevision.js';
 import { IVerifyFlags, runVerify } from './commands/verify.js';
-import { IStampFlags, loadEnvironment } from './config.js';
+import { IStampFlags, IStampRevisionFlags, loadEnvironment } from './config.js';
 import { describeError, EXIT_USAGE, toExitCode } from './errors.js';
 import { warningLine } from './output.js';
 import { VERSION } from './version.js';
@@ -78,11 +79,35 @@ program
   });
 
 program
+  .command('stamp-revision')
+  .description(
+    'certify a document revision, creating a lineage token or appending to an existing one; ' +
+      'name the next producer, or finalize',
+  )
+  .argument('[sha256-hex]', 'digest of the revision; alternatively use --file')
+  .option('--file <path>', 'hash this file locally instead of passing a digest')
+  .requiredOption('--token-file <path>', 'lineage token; created for an initial revision, otherwise appended to')
+  .requiredOption('--key-file <path>', 'secp256k1 private key (64 hex) that signs this revision')
+  .option('--recipient-key <hex>', "compressed secp256k1 public key (66 hex) of the next revision's producer")
+  .option('--recipient-key-file <path>', "file holding the next producer's public key; alternative to --recipient-key")
+  .option('--finalize', 'make this the final revision: seal it and burn the token, so no revision can follow')
+  .option('--network <name>', 'mainnet or testnet2; or UNICITY_NETWORK (default mainnet)')
+  .option('--gateway <url>', 'override the gateway URL; or UNICITY_GATEWAY_URL')
+  .option('--api-key <key>', 'gateway API key; or UNICITY_API_KEY')
+  .option('--trust-base <path>', 'override the bundled trust base; or UNICITY_TRUST_BASE')
+  .option('--timeout <seconds>', 'wait for the inclusion proof; or UNICITY_TIMEOUT (default 60)')
+  .option('--allow-insecure', 'permit the API key over plain HTTP (local development only)')
+  .action(async (digest: string | undefined, flags: IStampRevisionFlags) => {
+    process.exitCode = await runStampRevision(digest, flags, context());
+  });
+
+program
   .command('verify')
-  .description('verify a timestamp token offline and print what it proves')
+  .description('verify a timestamp or document lineage token offline and print what it proves')
   .argument('<token-file>', 'token file, or "-" for stdin; raw CBOR or hex text')
-  .option('--hash <sha256-hex>', 'assert the token is for this digest')
-  .option('--file <path>', 'assert the token is for this file, hashed locally')
+  .option('--hash <sha256-hex>', 'assert the token is for this digest (for a lineage: one of its revisions)')
+  .option('--file <path>', 'assert the token is for this file, hashed locally (for a lineage: one of its revisions)')
+  .option('--token-id <hex>', 'assert the lineage is the one with this token id, as given to you by its issuer')
   .option('--network <name>', "use this network's bundled trust base instead of the one matching the token")
   .option('--trust-base <path>', 'use this trust base file; or UNICITY_TRUST_BASE')
   .action(async (file: string, flags: IVerifyFlags) => {

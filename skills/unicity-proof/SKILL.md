@@ -23,6 +23,21 @@ Then read `Expected hash  matches`. Without `--file` or `--hash` that line tells
 you the proof was never tied to anything — a bare `Status OK` on its own
 establishes nothing about the file in front of you.
 
+A document lineage token (from `stamp-revision`, `Token type  document lineage`)
+holds several revisions. With `--file` it passes if **any** revision carries the
+file's hash, so read the `Expected hash` line in full: `matches revision 1;
+superseded by revision 2` means the file is a genuine but outdated revision.
+`matches revision 2 (the final)` means the lineage was finalized with that
+revision (`--finalize`); no later revision can exist.
+
+A matching hash does not say *which* lineage the file is in: one issuer can
+start several certified lineages from the same document. Only the token id
+identifies a lineage, so verify with `--token-id <id>`, using the id the
+issuer gave you through a channel you trust, and read the `Lineage id` line:
+`matches` ties the result to that lineage; `not checked` means the `Issuer`
+and `Expected hash` lines are not enough on their own; `differs` means this
+is another lineage.
+
 Also read the `Trust base` line. A verdict is only as good as the root of trust
 behind it, and `OK` against someone else's trust base means nothing.
 
@@ -58,8 +73,8 @@ about foresight.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success. For `verify`: valid, and the hash matched if one was given. |
-| `1` | Verification failed, hash mismatch, or the input is not a token. |
+| `0` | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
+| `1` | Verification failed, hash or token id mismatch, or the input is not a token. |
 | `2` | Usage or configuration error. |
 | `3` | Network error, aggregator rejection, or timeout. |
 | `130` | Interrupted. |

@@ -5,6 +5,7 @@ import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/Inclusion
 import { VerificationError } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationError.js';
 
 import { errorMessage, StampError } from './lib/errors.js';
+import { LineageError } from './lib/LineageClient.js';
 
 export const EXIT_OK = 0;
 /** Verification failed, hash mismatch, or the input is not a token. */
@@ -68,6 +69,9 @@ export function toExitCode(error: unknown, interrupted = false): number {
   }
   if (error instanceof VerificationError) {
     return EXIT_VERIFICATION_FAILED;
+  }
+  if (error instanceof LineageError) {
+    return error.code === 'INVALID_TOKEN' ? EXIT_VERIFICATION_FAILED : EXIT_USAGE;
   }
   return EXIT_USAGE;
 }
