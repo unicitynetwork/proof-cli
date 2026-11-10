@@ -24,13 +24,17 @@ import {
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
 
 describe('stampRevisionWith', () => {
-  const aggregator = TestAggregatorClient.create();
-  const client = new StateTransitionClient(aggregator);
   const bob = SigningService.generatePrivateKey();
   const bobPublic = new SigningService(bob).publicKey;
+  // A fresh aggregator per test: a genesis is deterministic in its issuer, digest
+  // and recipient, so tests sharing one would all continue the same lineage.
+  let aggregator: TestAggregatorClient;
+  let client: StateTransitionClient;
   let directory: string;
 
   beforeEach(async () => {
+    aggregator = TestAggregatorClient.create();
+    client = new StateTransitionClient(aggregator);
     directory = await tempDir('proof-cli-revision-');
   });
 
@@ -198,7 +202,10 @@ describe('stamp-revision output', () => {
   });
 
   it('marks a new lineage and a final revision', () => {
-    expect(revisionText({ ...summary, created: true, revision: 0n })).toContain('Revision       0  (new lineage)\n');
+    const created = revisionText({ ...summary, created: true, revision: 0n });
+    expect(created).toContain('Revision       0  (new lineage)\n');
+    expect(created).toContain(`Token id       ${'aa'.repeat(32)}  (identifies this lineage; give it to verifiers)\n`);
+    expect(revisionText(summary)).toContain(`Token id       ${'aa'.repeat(32)}\n`);
     const final = revisionText({ ...summary, nextProducer: null });
     expect(final).toContain('Revision       2  (final)\n');
     expect(final).toContain('Next producer  none; the lineage is finalized (sealed and burned)\n');

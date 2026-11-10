@@ -421,7 +421,10 @@ export function revisionText(summary: IRevisionSummary): string {
     line('Next producer', keyLabel(summary.nextProducer, FINALIZED_LABEL)),
     line('Certified at', `${formatIso(summary.referenceTime)}  (reference time ${summary.referenceTime})`),
     line('Round', `${summary.roundNumber}  (round timestamp ${summary.roundTimestamp}, epoch ${summary.epoch})`),
-    line('Token id', HexConverter.encode(summary.tokenId)),
+    line(
+      'Token id',
+      `${HexConverter.encode(summary.tokenId)}${summary.created ? '  (identifies this lineage; give it to verifiers)' : ''}`,
+    ),
     line('Written', summary.tokenFile),
   ].join('\n');
 }
@@ -497,6 +500,8 @@ export interface ILineageVerifyJson extends ILineageDescriptionJson {
   readonly command: 'verify';
   readonly details: IResultJson | null;
   readonly expectedHashMatches: boolean | null;
+  /** Whether the token id is the one passed with --token-id; null when not checked. */
+  readonly expectedTokenIdMatches: boolean | null;
   /** Positions of the revisions carrying the expected hash; null when not checked. */
   readonly matchingRevisions: readonly number[] | null;
   readonly reason: string | null;
@@ -561,12 +566,19 @@ function lineageLines(description: ILineageDescription): string[] {
   return lines;
 }
 
-// As for timestamps, relies on `verifyLineage` failing closed: an OK result with
-// no comparison can only mean no digest was given.
+// Whether verification got as far as the comparisons with what the caller expects:
+// it did when it passed, or when either comparison was made. As for timestamps,
+// this relies on `verifyLineage` failing closed and making every comparison it was
+// asked for once it gets that far, so a comparison missing past that point can
+// only mean nothing was given to compare with.
+function lineageComparisonsReached(result: ILineageVerificationResult): boolean {
+  return result.status === 'OK' || result.matchingRevisions !== null || result.tokenIdMatches !== null;
+}
+
 function lineageExpectedHashLabel(result: ILineageVerificationResult): string {
   const matching = result.matchingRevisions;
   if (matching === null) {
-    return result.status === 'OK'
+    return lineageComparisonsReached(result)
       ? 'not checked; pass --file or --hash to find your document in the lineage'
       : 'not checked; verification failed';
   }
@@ -580,6 +592,17 @@ function lineageExpectedHashLabel(result: ILineageVerificationResult): string {
     return `${which}; superseded by revision ${latest}`;
   }
   return `${which} (the ${result.description.finalized ? 'final' : 'latest'})`;
+}
+
+// Like the expected hash: without an id there is no telling this lineage from a
+// parallel one the same issuer started from the same document, so say so.
+function lineageIdLabel(result: ILineageVerificationResult): string {
+  if (result.tokenIdMatches === null) {
+    return lineageComparisonsReached(result)
+      ? 'not checked; pass --token-id to tie this to the lineage you were given'
+      : 'not checked; verification failed';
+  }
+  return result.tokenIdMatches ? 'matches' : 'differs from the token id you were given';
 }
 
 /**
@@ -598,6 +621,7 @@ export function lineageVerifyText(result: ILineageVerificationResult, source: Tr
     ),
     line('Trust base', trustBaseLabel(source)),
     line('Expected hash', lineageExpectedHashLabel(result)),
+    line('Lineage id', lineageIdLabel(result)),
     ...lineageLines(result.description),
   ];
   if (result.status !== 'OK' && result.details !== null) {
@@ -660,6 +684,7 @@ export function lineageVerifyJson(
   return {
     command: 'verify',
     expectedHashMatches: result.matchingRevisions === null ? null : result.matchingRevisions.length > 0,
+    expectedTokenIdMatches: result.tokenIdMatches,
     matchingRevisions: result.matchingRevisions,
     reason: result.reason,
     status: result.status,

@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
+import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
 import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
@@ -45,6 +46,15 @@ describe('runVerify on a token whose network has no bundled pin', () => {
       reason: 'unknown network id 3; pass --trust-base',
       status: 'FAIL',
       trustBase: null,
+    });
+  });
+
+  it('refuses --token-id on a token that is not a lineage, as a usage error', async () => {
+    await expect(
+      runVerify(file, { tokenId: 'ab'.repeat(32) }, testContext({ json: true }).context),
+    ).rejects.toMatchObject({
+      exitCode: EXIT_USAGE,
+      message: '--token-id applies to document lineage tokens only; this token is not one.',
     });
   });
 
@@ -102,6 +112,57 @@ describe('runVerify on a document lineage', () => {
     expect(out).toContain(`Revision 2     SHA-256 ${THIRD_DIGEST_HEX}\n  Signed by    ${TEST_PUBLIC_KEY_HEX}\n`);
     expect(out).toContain(`  Passes to    ${fixture.bobPublicHex}\n  Certified at`);
     expect(out).toContain('Expected hash  not checked; pass --file or --hash');
+    expect(out).toContain('Lineage id     not checked; pass --token-id to tie this to the lineage you were given\n');
+  });
+
+  it('checks the lineage against the token id it was given', async () => {
+    const tokenId = HexConverter.encode(fixture.token.id.bytes);
+    const text = testContext();
+    expect(await runVerify(fixture.tokenFile, { tokenId, trustBase: fixture.trustBaseFile }, text.context)).toBe(
+      EXIT_OK,
+    );
+    expect(text.stdout()).toContain('Lineage id     matches\n');
+
+    const json = testContext({ json: true });
+    expect(
+      await runVerify(
+        fixture.tokenFile,
+        { hash: THIRD_DIGEST_HEX, tokenId: `0x${tokenId.toUpperCase()}`, trustBase: fixture.trustBaseFile },
+        json.context,
+      ),
+    ).toBe(EXIT_OK);
+    expect(json.json()).toMatchObject({ expectedHashMatches: true, expectedTokenIdMatches: true, status: 'OK' });
+  });
+
+  it('fails on another lineage than the one it was given', async () => {
+    // The finalized copy shares the token id; any other lineage does not.
+    const other = HexConverter.encode(new Uint8Array(32).fill(0x5a));
+    const text = testContext();
+    expect(await runVerify(fixture.tokenFile, { tokenId: other, trustBase: fixture.trustBaseFile }, text.context)).toBe(
+      EXIT_VERIFICATION_FAILED,
+    );
+    const out = text.stdout();
+    expect(out).toMatch(/^Status {9}FAIL: Token id mismatch: this is not the lineage you were given\.\n/);
+    expect(out).toContain('Lineage id     differs from the token id you were given\n');
+    expect(out).toContain('Expected hash  not checked; pass --file or --hash');
+
+    const json = testContext({ json: true });
+    expect(await runVerify(fixture.tokenFile, { tokenId: other, trustBase: fixture.trustBaseFile }, json.context)).toBe(
+      EXIT_VERIFICATION_FAILED,
+    );
+    expect(json.json()).toMatchObject({
+      expectedHashMatches: null,
+      expectedTokenIdMatches: false,
+      reason: 'Token id mismatch: this is not the lineage you were given.',
+      status: 'FAIL',
+    });
+  });
+
+  it('refuses a malformed token id before reading anything, as a usage error', async () => {
+    await expect(runVerify('/no/such/token', { tokenId: 'abcd' }, testContext().context)).rejects.toMatchObject({
+      exitCode: EXIT_USAGE,
+      message: "--token-id must be a token id of 64 hex characters, got 'abcd'.",
+    });
   });
 
   it('finds an expected hash among the revisions', async () => {
@@ -221,6 +282,7 @@ describe('verify output for a document lineage', () => {
       matchingRevisions: null,
       reason: null,
       status: 'OK',
+      tokenIdMatches: null,
       ...changes,
     };
   }
@@ -308,6 +370,38 @@ describe('verify output for a document lineage', () => {
     // Ends with the last revision, not with an empty result tree.
     expect(text).toMatch(/ {2}Round {8}\d+ {2}\(round timestamp \d+, epoch \d+\)$/);
     expect(lineageVerifyJson(failed, null)).toMatchObject({ details: null, trustBase: null });
+  });
+
+  it.each<[string, Partial<ILineageVerificationResult>, string]>([
+    ['no id given', {}, 'not checked; pass --token-id to tie this to the lineage you were given'],
+    ['verification failed first', { reason: 'x', status: 'FAIL' }, 'not checked; verification failed'],
+    ['the id matches', { tokenIdMatches: true }, 'matches'],
+    [
+      'the id differs',
+      { reason: 'x', status: 'FAIL', tokenIdMatches: false },
+      'differs from the token id you were given',
+    ],
+  ])('labels the lineage id when %s', (_, changes, label) => {
+    expect(lineageVerifyText(result(changes), bundled)).toContain(`Lineage id     ${label}\n`);
+  });
+
+  it('does not blame a wrong lineage id on verification in the hash label, nor the reverse', () => {
+    const wrongId = result({ reason: 'x', status: 'FAIL', tokenIdMatches: false });
+    expect(lineageVerifyText(wrongId, bundled)).toContain(
+      'Expected hash  not checked; pass --file or --hash to find your document in the lineage\n',
+    );
+    const wrongHash = result({ matchingRevisions: [], reason: 'x', status: 'FAIL' });
+    expect(lineageVerifyText(wrongHash, bundled)).toContain(
+      'Lineage id     not checked; pass --token-id to tie this to the lineage you were given\n',
+    );
+  });
+
+  it('reports the lineage id comparison in JSON', () => {
+    expect(lineageVerifyJson(result(), bundled).expectedTokenIdMatches).toBeNull();
+    expect(lineageVerifyJson(result({ tokenIdMatches: true }), bundled).expectedTokenIdMatches).toBe(true);
+    expect(lineageVerifyJson(result({ status: 'FAIL', tokenIdMatches: false }), bundled).expectedTokenIdMatches).toBe(
+      false,
+    );
   });
 
   it('reports a mismatch as such in JSON', () => {

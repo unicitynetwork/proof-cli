@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { CertificationResponse } from '@unicitylabs/state-transition-sdk/lib/api/CertificationResponse.js';
 import type { IAggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/IAggregatorClient.js';
@@ -7,6 +8,9 @@ import { InclusionProofResponse } from '@unicitylabs/state-transition-sdk/lib/ap
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
+import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
+import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
+import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
@@ -15,6 +19,7 @@ import {
   appendRevision,
   createLineage,
   currentProducerKey,
+  deriveGenesisSalt,
   isFinalized,
   LineageError,
 } from '../../../src/lib/LineageClient.js';
@@ -42,10 +47,19 @@ class CountingClient implements IAggregatorClient {
 }
 
 describe('LineageClient', () => {
-  const aggregator = TestAggregatorClient.create();
-  const counting = new CountingClient(aggregator);
-  const client = new StateTransitionClient(counting);
-  const trustBase = aggregator.rootTrustBase;
+  // A fresh aggregator per test: a genesis is deterministic in its issuer, digest
+  // and recipient, so tests sharing one would all continue the same lineage.
+  let aggregator: TestAggregatorClient;
+  let counting: CountingClient;
+  let client: StateTransitionClient;
+  let trustBase: RootTrustBase;
+
+  beforeEach(() => {
+    aggregator = TestAggregatorClient.create();
+    counting = new CountingClient(aggregator);
+    client = new StateTransitionClient(counting);
+    trustBase = aggregator.rootTrustBase;
+  });
   const fast = { pollIntervalMs: 10, timeoutMs: 2_000 };
 
   const alice = SigningService.generatePrivateKey();
@@ -115,6 +129,48 @@ describe('LineageClient', () => {
     // Same inputs against the same starting state: the aggregator already holds this request.
     const again = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
     expect(HexConverter.encode(again.toCBOR())).toEqual(HexConverter.encode(first.toCBOR()));
+  });
+
+  it('replays an interrupted genesis identically, so running it again recovers the lineage', async () => {
+    const before = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+    // Same issuer, digest and recipient: the same salt, so the aggregator already holds this mint.
+    const again = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+    expect(HexConverter.encode(again.toCBOR())).toEqual(HexConverter.encode(before.toCBOR()));
+  });
+
+  it('derives a different token id from a different issuer, digest or recipient', async () => {
+    const id = async (issuer: Uint8Array, digest: Uint8Array, next: Uint8Array | null): Promise<string> =>
+      HexConverter.encode((await createLineage(client, trustBase, digest, issuer, next, fast)).id.bytes);
+    const base = await id(alice, TEST_DIGEST, publicKey(bob));
+    const others = [
+      await id(carol, TEST_DIGEST, publicKey(bob)),
+      await id(alice, OTHER_DIGEST, publicKey(bob)),
+      await id(alice, TEST_DIGEST, publicKey(carol)),
+      await id(alice, TEST_DIGEST, null),
+    ];
+    expect(new Set([base, ...others]).size).toBe(5);
+  });
+
+  it('keeps the salt secret to the issuer: it depends on the private key', async () => {
+    const recipient = EncodedPredicate.fromPredicate(SignaturePredicate.create(publicKey(bob)));
+    const auxData = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+    const salt = await deriveGenesisSalt(alice, recipient, auxData);
+    expect(salt.toBytes()).toHaveLength(32);
+    expect((await deriveGenesisSalt(alice, recipient, auxData)).equals(salt)).toBe(true);
+    expect((await deriveGenesisSalt(carol, recipient, auxData)).equals(salt)).toBe(false);
+    // Pinned: the issuer's *private* key goes in, so nobody else can compute the
+    // token id before the genesis is certified and mint into its slot first.
+    const expected = createHash('sha256')
+      .update(
+        CborSerializer.encodeArray(
+          CborSerializer.encodeTextString('unicity-document-lineage/salt'),
+          CborSerializer.encodeByteString(alice),
+          recipient.toCBOR(),
+          CborSerializer.encodeByteString(auxData),
+        ),
+      )
+      .digest();
+    expect(salt.toBytes()).toEqual(new Uint8Array(expected));
   });
 
   it('cannot fork: a different successor of a spent state is never certified', async () => {

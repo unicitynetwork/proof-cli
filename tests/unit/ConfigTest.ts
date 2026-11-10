@@ -11,6 +11,7 @@ import {
   parseNetworkName,
   parsePrivateKey,
   parsePublicKey,
+  parseTokenId,
   parseTimeoutSeconds,
   resolveDigest,
   resolveNetworkSelection,
@@ -40,6 +41,20 @@ describe('parseDigest', () => {
   it.each(['', 'abc', TEST_DIGEST_HEX.slice(0, 63), `${TEST_DIGEST_HEX}0`, 'zz'.repeat(32)])('rejects %p', (input) => {
     expect(() => parseDigest(input)).toThrow(CliError);
     expect(() => parseDigest(input)).toThrow(/64 hex characters/);
+  });
+});
+
+describe('parseTokenId', () => {
+  it('accepts 64 hex characters, any case, with or without 0x', () => {
+    expect(HexConverter.encode(parseTokenId('AB'.repeat(32)))).toEqual('ab'.repeat(32));
+    expect(HexConverter.encode(parseTokenId(`0x${'cd'.repeat(32)}`))).toEqual('cd'.repeat(32));
+  });
+
+  it('rejects anything else as a usage error', () => {
+    expect(() => parseTokenId('ab'.repeat(31))).toThrow(
+      `--token-id must be a token id of 64 hex characters, got '${'ab'.repeat(31)}'.`,
+    );
+    expect(() => parseTokenId('zz'.repeat(32))).toThrow(CliError);
   });
 });
 

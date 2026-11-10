@@ -128,7 +128,9 @@ unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file 
 ```
 
 - Exactly one of `<sha256-hex>` and `--file`, and exactly one of `--recipient-key`, `--recipient-key-file` and `--finalize`, is required. `--token-file` and `--key-file` are always required; `UNICITY_PRIVATE_KEY` is not consulted.
-- If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type, recipient and revision, which is what makes the origin "accepted". Because the recipient is signed, the issuer names the producer of revision 1 (or the burn, with `--finalize`), just as each later revision names its successor: whoever submits the mint cannot substitute another; the salt is random, so the token id cannot be predicted before the genesis is certified.
+- If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type, recipient and revision, which is what makes the origin "accepted". Because the recipient is signed, the issuer names the producer of revision 1 (or the burn, with `--finalize`), just as each later revision names its successor: whoever submits the mint cannot substitute another.
+- **The token id identifies the lineage, and nothing else does.** It is printed when the lineage is created, marked `(identifies this lineage; give it to verifiers)`; pass it on through a channel the verifiers trust, and have them check it with `verify --token-id`. The issuer key and the first revision's hash are not enough: the same issuer can start any number of certified lineages from the same document, each with its own fork-free history, and verification cannot tell them apart.
+- The salt, and so the token id, is derived from the issuer's private key, the recipient and revision 0, not drawn at random. Running an interrupted genesis again with the same file, key, digest and recipient therefore recovers the same lineage instead of starting a parallel one. Nobody without the issuer's key can compute the token id before the genesis is certified, so nobody can mint into its slot first. Starting a second, separate lineage from the same document needs a different first producer (or issuer).
 - If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. The file is replaced atomically, and on any write failure the full token is printed as hex.
 - `--finalize` makes this revision the final one, a *seal*: its auxiliary data is `CBOR["seal", i, SHA-256(doc_i)]` and its recipient is the burn predicate `P_burn(SHA-256(auxiliary data))`, which no key can unlock. Appending to a finalized lineage fails before contacting the gateway (exit 2). On a new lineage, `--finalize` mints revision 0 as a seal: a single-revision document that is final from the start.
 - The state mask of each step is derived from the producer's key and the spent state, so if the command is interrupted after certification, running the same command again with the same file, key, digest and recipient recovers the same revision.
@@ -137,14 +139,16 @@ unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file 
 `verify` and `inspect` recognise lineage tokens by their token type and list every revision with its hash, signer, next producer and certification time:
 
 ```bash
-unicity-proof verify doc.lineage                  # is this a valid lineage?
-unicity-proof verify doc.lineage --file doc.pdf   # ...and which revision is this file?
+unicity-proof verify doc.lineage                                   # is this a valid lineage?
+unicity-proof verify doc.lineage --token-id <id from the issuer>   # ...and the one I was given?
+unicity-proof verify doc.lineage --token-id <id> --file doc.pdf    # ...and which revision is this file?
 ```
 
 ```
 Status         OK  (inclusion proofs, consensus signatures, issuer signature and revision chain verified against the bundled testnet2 trust base)
 Trust base     bundled testnet2 pin
 Expected hash  matches revision 1; superseded by revision 2
+Lineage id     matches
 Token type     document lineage
 Network        testnet2 (4)
 Token id       5394db437e25b271272701e70e3f211ab4be2449fbe5b5d33664afa630b92357
@@ -160,7 +164,7 @@ Revision 0     SHA-256 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e730433629
 …
 ```
 
-With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision, or `none; the lineage is finalized` after a seal, which is marked `(final)`. In `--json` output a lineage has `"tokenType": "lineage"`, `finalized`, a `revisions` array (each with `sealed`) and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
+With `--token-id`, the lineage passes only if its token id is that one; `Lineage id` says whether it matched, or that it was not checked, in which case nothing has established *which* lineage this is. A different id is a failure, reported before any hash mismatch. `--token-id` is refused for tokens that are not lineages. With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision, or `none; the lineage is finalized` after a seal, which is marked `(final)`. In `--json` output a lineage has `"tokenType": "lineage"`, `finalized`, a `revisions` array (each with `sealed`), `expectedTokenIdMatches` (null when no `--token-id` was given) and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
 
 Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer, or `CBOR["seal", i, SHA-256(doc_i)]` on the final revision, whose recipient is then the burn predicate with reason `SHA-256(auxiliary data)`; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, recipient, auxiliary data])`, where `recipient` is the mint's recipient predicate in its tagged CBOR encoding (tag 39032). Verification additionally requires the indices to increase by one, the reference times not to decrease along the chain, and a revision to be burned exactly when it is a seal, with the burn reason as above.
 
@@ -207,8 +211,8 @@ unicity-proof verify document.cbor --file document.pdf --json | jq -r .reference
 
 | Exit code | Meaning |
 | --- | --- |
-| 0 | Success. For `verify`: valid, and the hash matched if one was given. |
-| 1 | Verification failed, hash mismatch, or the input is not a token. |
+| 0 | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
+| 1 | Verification failed, hash or token id mismatch, or the input is not a token. |
 | 2 | Usage or configuration error. |
 | 3 | Network error, aggregator rejection, or timeout. |
 | 130 | Interrupted. |

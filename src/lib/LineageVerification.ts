@@ -237,6 +237,13 @@ export function describeLineage(token: Token): ILineageDescription {
 export interface ILineageVerifyOptions {
   /** Digest one of the revisions is expected to carry. */
   readonly expectedDigest?: Uint8Array;
+  /**
+   * Token id the lineage is expected to have. Only the id identifies a lineage:
+   * one issuer can start any number of certified lineages from the same initial
+   * revision, and nothing else tells them apart. Verifiers should receive it
+   * through a trusted channel when the lineage is created.
+   */
+  readonly expectedTokenId?: Uint8Array;
 }
 
 export interface ILineageVerificationResult {
@@ -250,6 +257,11 @@ export interface ILineageVerificationResult {
   readonly matchingRevisions: readonly number[] | null;
   readonly reason: string | null;
   readonly status: 'FAIL' | 'OK';
+  /**
+   * Whether the token id is the expected one; null when no id was given or the
+   * comparison was not reached.
+   */
+  readonly tokenIdMatches: boolean | null;
 }
 
 /**
@@ -327,12 +339,14 @@ function deepestMessage(result: VerificationResult<unknown>): string {
 
 /**
  * Verify a document lineage token offline: the SDK's full token verification with
- * the lineage issuance policy, then the chain rules, then, if asked, whether any
- * revision carries the expected digest.
+ * the lineage issuance policy, then the chain rules, then, if asked, whether the
+ * token id is the expected one and whether any revision carries the expected
+ * digest. Without an expected token id, an OK result does not say which lineage
+ * this is: see {@link ILineageVerifyOptions.expectedTokenId}.
  *
  * @param {Token} token Token to verify.
  * @param {RootTrustBase} trustBase Trust base of the token's network.
- * @param {ILineageVerifyOptions} options Expected digest.
+ * @param {ILineageVerifyOptions} options Expected token id and digest.
  * @returns {Promise<ILineageVerificationResult>} Outcome.
  */
 export async function verifyLineage(
@@ -348,6 +362,7 @@ export async function verifyLineage(
       matchingRevisions: null,
       reason: `Not a document lineage token: token type ${HexConverter.encode(token.type.bytes)}.`,
       status: 'FAIL',
+      tokenIdMatches: null,
     };
   }
   if (token.networkId.id !== trustBase.networkId.id) {
@@ -357,29 +372,46 @@ export async function verifyLineage(
       matchingRevisions: null,
       reason: `The token is for network ${token.networkId.id} and the trust base for network ${trustBase.networkId.id}.`,
       status: 'FAIL',
+      tokenIdMatches: null,
     };
   }
   const sdk = await token.verify(createLineageVerificationContext(trustBase));
   const details = VerificationResult.fromResults('LineageTokenVerification', [sdk, await chainRules(description)]);
   if (details.status !== VerificationStatus.OK) {
-    return { description, details, matchingRevisions: null, reason: deepestMessage(details), status: 'FAIL' };
-  }
-  const expected = options.expectedDigest;
-  if (expected === undefined) {
-    return { description, details, matchingRevisions: null, reason: null, status: 'OK' };
-  }
-  // Every digest decoded: the chain rules above fail on any revision that does not.
-  const matchingRevisions = description.revisions.flatMap((revision, position) =>
-    revision.digest !== null && areUint8ArraysEqual(revision.digest, expected) ? [position] : [],
-  );
-  if (matchingRevisions.length === 0) {
     return {
       description,
       details,
-      matchingRevisions,
-      reason: 'Hash mismatch: no revision of the lineage certifies this digest.',
+      matchingRevisions: null,
+      reason: deepestMessage(details),
       status: 'FAIL',
+      tokenIdMatches: null,
     };
   }
-  return { description, details, matchingRevisions, reason: null, status: 'OK' };
+
+  const expectedId = options.expectedTokenId;
+  const tokenIdMatches = expectedId === undefined ? null : areUint8ArraysEqual(token.id.bytes, expectedId);
+  const expected = options.expectedDigest;
+  // Every digest decoded: the chain rules above fail on any revision that does not.
+  const matchingRevisions =
+    expected === undefined
+      ? null
+      : description.revisions.flatMap((revision, position) =>
+          revision.digest !== null && areUint8ArraysEqual(revision.digest, expected) ? [position] : [],
+        );
+
+  // The wrong lineage is reported first: which revision of it matches is beside the point.
+  let reason: string | null = null;
+  if (tokenIdMatches === false) {
+    reason = 'Token id mismatch: this is not the lineage you were given.';
+  } else if (matchingRevisions?.length === 0) {
+    reason = 'Hash mismatch: no revision of the lineage certifies this digest.';
+  }
+  return {
+    description,
+    details,
+    matchingRevisions,
+    reason,
+    status: reason === null ? 'OK' : 'FAIL',
+    tokenIdMatches,
+  };
 }

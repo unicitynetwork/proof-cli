@@ -16,6 +16,7 @@ import {
   sealPredicate,
 } from '../../../src/lib/LineagePayload.js';
 import { describeLineage, verifyLineage } from '../../../src/lib/LineageVerification.js';
+import { bundledTrustBase } from '../../../src/lib/networks.js';
 import { OTHER_DIGEST, TEST_DIGEST } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 import { certifyMint } from '../../support/TimestampFixtures.js';
@@ -183,6 +184,45 @@ describe('LineageVerification', () => {
       const result = await verifyLineage(await signedGenesis(data, await sealPredicate(other)), trustBase);
       expect(result.status).toEqual('FAIL');
       expect(result.reason).toEqual('Revision 0 is a seal, but its burn reason does not commit to it.');
+    });
+  });
+
+  describe('token id', () => {
+    it('passes when the lineage is the one with the expected token id', async () => {
+      const token = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const result = await verifyLineage(token, trustBase, { expectedTokenId: token.id.bytes });
+      expect(result.reason).toBeNull();
+      expect(result.status).toEqual('OK');
+      expect(result.tokenIdMatches).toBe(true);
+      expect((await verifyLineage(token, trustBase)).tokenIdMatches).toBeNull();
+    });
+
+    // The shadow lineage from the review of issue #13: same issuer, same first
+    // producer, same initial document, but another salt. Both verify on their own,
+    // and only the token id tells them apart.
+    it('tells a parallel lineage from the same issuer and document apart', async () => {
+      const real = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+      const shadow = await signedGenesis(data, SignaturePredicate.create(publicKey(bob)));
+      expect((await verifyLineage(shadow, trustBase)).status).toEqual('OK');
+      expect(describeLineage(shadow).issuer).toEqual(describeLineage(real).issuer);
+
+      const result = await verifyLineage(shadow, trustBase, {
+        expectedDigest: TEST_DIGEST,
+        expectedTokenId: real.id.bytes,
+      });
+      expect(result.status).toEqual('FAIL');
+      expect(result.tokenIdMatches).toBe(false);
+      expect(result.reason).toEqual('Token id mismatch: this is not the lineage you were given.');
+      // The digest is still compared, so the output can show both.
+      expect(result.matchingRevisions).toEqual([0]);
+    });
+
+    it('does not compare the token id of a token that fails verification', async () => {
+      const token = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const result = await verifyLineage(token, bundledTrustBase('mainnet'), { expectedTokenId: token.id.bytes });
+      expect(result.status).toEqual('FAIL');
+      expect(result.tokenIdMatches).toBeNull();
     });
   });
 

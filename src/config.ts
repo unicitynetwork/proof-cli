@@ -130,6 +130,15 @@ export function parseDigest(input: string): Uint8Array {
 }
 
 /**
+ * @param {string} input 64 hex characters, any case, optional 0x prefix.
+ * @returns {Uint8Array} 32-byte token id.
+ * @throws {CliError} If the input is not a token id.
+ */
+export function parseTokenId(input: string): Uint8Array {
+  return parseHex32(input, `--token-id must be a token id of 64 hex characters, got '${input}'.`);
+}
+
+/**
  * @param {string} input 64 hex characters, any case, optional 0x prefix, surrounding whitespace allowed.
  * @returns {Uint8Array} 32-byte secp256k1 private key.
  * @throws {CliError} If the input is not a key.

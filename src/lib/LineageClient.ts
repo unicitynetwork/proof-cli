@@ -100,6 +100,38 @@ export async function deriveStateMask(privateKey: Uint8Array, token: Token): Pro
 }
 
 /**
+ * Salt of a genesis, `salt = PRF(k_issuer, recipient, auxData)`: derived from the
+ * issuer's private key, the encoded recipient and the revision 0 payload rather
+ * than drawn at random. Re-running an interrupted genesis with the same key,
+ * digest and recipient therefore rebuilds the identical mint, so the aggregator
+ * returns the proof it already holds instead of a second, parallel lineage being
+ * created. The token id `H(salt, network)` still cannot be computed by anyone
+ * without the issuer's key, so nobody else can mint into its slot first.
+ *
+ * @param {Uint8Array} issuerPrivateKey Issuer's secp256k1 private key.
+ * @param {EncodedPredicate} recipient Recipient predicate of the mint.
+ * @param {Uint8Array} auxData Exact auxiliary data bytes of the mint.
+ * @returns {Promise<TokenSalt>} Deterministic 32-byte salt.
+ */
+export async function deriveGenesisSalt(
+  issuerPrivateKey: Uint8Array,
+  recipient: EncodedPredicate,
+  auxData: Uint8Array,
+): Promise<TokenSalt> {
+  const hash = await new DataHasher(HashAlgorithm.SHA256)
+    .update(
+      CborSerializer.encodeArray(
+        CborSerializer.encodeTextString(`${LINEAGE_TAG}/salt`),
+        CborSerializer.encodeByteString(issuerPrivateKey),
+        recipient.toCBOR(),
+        CborSerializer.encodeByteString(auxData),
+      ),
+    )
+    .digest();
+  return TokenSalt.fromBytes(hash.data);
+}
+
+/**
  * Payload and recipient of a revision: to the next producer's `P_sig`, or, when
  * there is none, sealed and burned, so that no further revision can follow.
  *
@@ -130,8 +162,10 @@ async function revisionStep(
  * the lineage is finalized at once: revision 0 is a seal, minted to the burn
  * predicate.
  *
- * The salt is random, so the token id stays unpredictable until the genesis is
- * certified and cannot be squatted.
+ * The salt is derived from the issuer's key ({@link deriveGenesisSalt}), so an
+ * interrupted run recovers the same lineage when repeated, while the token id stays
+ * unpredictable to everyone else and cannot be squatted. The token id is what
+ * identifies the lineage; verifiers should receive it through a trusted channel.
  *
  * @param {StateTransitionClient} client Aggregator client.
  * @param {RootTrustBase} trustBase Trust base of the network behind the client.
@@ -150,12 +184,13 @@ export async function createLineage(
   options: ICertifyOptions = {},
 ): Promise<Token> {
   const { auxData, recipient } = await revisionStep(0n, digest, nextProducer);
-  const salt = TokenSalt.generate();
+  const encodedRecipient = EncodedPredicate.fromPredicate(recipient);
+  const salt = await deriveGenesisSalt(issuerPrivateKey, encodedRecipient, auxData);
   const tokenId = await TokenId.fromSalt(trustBase.networkId, salt);
   const reason = await LineageGenesisReason.sign(
     tokenId,
     LINEAGE_TOKEN_TYPE,
-    EncodedPredicate.fromPredicate(recipient),
+    encodedRecipient,
     auxData,
     new SigningService(issuerPrivateKey),
   );
