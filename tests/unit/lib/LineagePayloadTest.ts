@@ -79,21 +79,62 @@ describe('LineagePayload', () => {
   });
 
   describe('LineageGenesisReason', () => {
+    const bob = EncodedPredicate.fromPredicate(
+      SignaturePredicate.create(publicKey(SigningService.generatePrivateKey())),
+    );
+    const carol = EncodedPredicate.fromPredicate(
+      SignaturePredicate.create(publicKey(SigningService.generatePrivateKey())),
+    );
+
     it('round-trips a genesis reason and rejects a wrong tag', async () => {
       const tokenId = await TokenId.fromSalt(NetworkId.LOCAL, TokenSalt.generate());
       const reason = await LineageGenesisReason.sign(
         tokenId,
         LINEAGE_TOKEN_TYPE,
+        bob,
         TEST_DIGEST,
         new SigningService(alice),
       );
       const decoded = LineageGenesisReason.fromCBOR(reason.toCBOR());
       expect(decoded.issuer).toEqual(publicKey(alice));
-      expect(await decoded.verify(tokenId, LINEAGE_TOKEN_TYPE, TEST_DIGEST)).toBe(true);
-      expect(await decoded.verify(tokenId, LINEAGE_TOKEN_TYPE, OTHER_DIGEST)).toBe(false);
+      expect(await decoded.verify(tokenId, LINEAGE_TOKEN_TYPE, bob, TEST_DIGEST)).toBe(true);
+      expect(await decoded.verify(tokenId, LINEAGE_TOKEN_TYPE, bob, OTHER_DIGEST)).toBe(false);
 
       const wrongTag = CborSerializer.encodeTag(1n, CborSerializer.encodeArray());
       expect(() => LineageGenesisReason.fromCBOR(wrongTag)).toThrow(LineageFormatError);
+    });
+
+    it('signs the recipient: the signature holds for no other first producer', async () => {
+      const tokenId = await TokenId.fromSalt(NetworkId.LOCAL, TokenSalt.generate());
+      const reason = await LineageGenesisReason.sign(
+        tokenId,
+        LINEAGE_TOKEN_TYPE,
+        bob,
+        TEST_DIGEST,
+        new SigningService(alice),
+      );
+      expect(await reason.verify(tokenId, LINEAGE_TOKEN_TYPE, bob, TEST_DIGEST)).toBe(true);
+      expect(await reason.verify(tokenId, LINEAGE_TOKEN_TYPE, carol, TEST_DIGEST)).toBe(false);
+      const burn = EncodedPredicate.fromPredicate(await sealPredicate(TEST_DIGEST));
+      expect(await reason.verify(tokenId, LINEAGE_TOKEN_TYPE, burn, TEST_DIGEST)).toBe(false);
+    });
+
+    it('pins the signed message format', async () => {
+      const tokenId = await TokenId.fromSalt(NetworkId.LOCAL, TokenSalt.generate());
+      const message = await LineageGenesisReason.signedMessage(tokenId, LINEAGE_TOKEN_TYPE, bob, TEST_DIGEST);
+      const expected = createHash('sha256')
+        .update(
+          CborSerializer.encodeArray(
+            CborSerializer.encodeTextString(LINEAGE_TAG),
+            CborSerializer.encodeUnsignedInteger(1n),
+            CborSerializer.encodeByteString(tokenId.bytes),
+            CborSerializer.encodeByteString(LINEAGE_TOKEN_TYPE.bytes),
+            bob.toCBOR(),
+            CborSerializer.encodeByteString(TEST_DIGEST),
+          ),
+        )
+        .digest();
+      expect(message.data).toEqual(new Uint8Array(expected));
     });
   });
 

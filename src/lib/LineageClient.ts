@@ -6,6 +6,7 @@ import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/sec
 import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
 import { SignaturePredicateUnlockScript } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicateUnlockScript.js';
+import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { MintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/MintTransaction.js';
@@ -124,7 +125,8 @@ async function revisionStep(
 
 /**
  * Create a lineage: mint revision 0, with the issuer's signature as the mint
- * reason and the next producer's `P_sig` as recipient. Without a next producer
+ * reason and the next producer's `P_sig` as recipient. The signature covers the
+ * recipient, so the issuer names the producer of revision 1. Without a next producer
  * the lineage is finalized at once: revision 0 is a seal, minted to the burn
  * predicate.
  *
@@ -153,6 +155,7 @@ export async function createLineage(
   const reason = await LineageGenesisReason.sign(
     tokenId,
     LINEAGE_TOKEN_TYPE,
+    EncodedPredicate.fromPredicate(recipient),
     auxData,
     new SigningService(issuerPrivateKey),
   );

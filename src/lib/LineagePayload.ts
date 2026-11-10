@@ -4,6 +4,7 @@ import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash
 import { Signature } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/Signature.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
+import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import { CborDeserializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { TokenId } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenId.js';
@@ -167,15 +168,18 @@ export async function sealPredicate(sealPayload: Uint8Array): Promise<BurnPredic
 }
 
 /**
- * Genesis mint reason: the issuer's signature over `(id, ty, auxData)`.
+ * Genesis mint reason: the issuer's signature over `(id, ty, recipient, auxData)`.
  *
  * ```
  * tag 39200 [ 1, issuer(33), signature(65) ]
  * ```
  *
  * The mint key is public, so anyone can mint a token of any type; this signature
- * is what makes an origin "accepted". Verifiers pin a lineage by its token id, or
- * by the issuer key together with the initial digest.
+ * is what makes an origin "accepted". It covers the genesis recipient, so the
+ * producer of revision 1 (or, for a lineage finalized at genesis, the burn) is
+ * named with the issuer's authority, like every later successor is named by its
+ * predecessor: whoever submits the mint cannot substitute another. The recipient
+ * is not repeated in the reason; it is read from the mint transaction.
  */
 export class LineageGenesisReason {
   private constructor(
@@ -241,6 +245,7 @@ export class LineageGenesisReason {
   /**
    * @param {TokenId} tokenId Token id of the lineage.
    * @param {TokenType} tokenType Token type.
+   * @param {EncodedPredicate} recipient Recipient predicate of the mint.
    * @param {Uint8Array} auxData Exact auxiliary data bytes of the mint.
    * @param {SigningService} issuer Issuer's signing service.
    * @returns {Promise<LineageGenesisReason>} Signed reason.
@@ -248,23 +253,34 @@ export class LineageGenesisReason {
   public static async sign(
     tokenId: TokenId,
     tokenType: TokenType,
+    recipient: EncodedPredicate,
     auxData: Uint8Array,
     issuer: SigningService,
   ): Promise<LineageGenesisReason> {
-    const signature = await issuer.sign(await LineageGenesisReason.signedMessage(tokenId, tokenType, auxData));
+    const signature = await issuer.sign(
+      await LineageGenesisReason.signedMessage(tokenId, tokenType, recipient, auxData),
+    );
     return new LineageGenesisReason(issuer.publicKey, signature);
   }
 
   /**
    * Message the issuer signs:
-   * `SHA-256(CBOR["unicity-document-lineage", 1, id, ty, auxData])`.
+   * `SHA-256(CBOR["unicity-document-lineage", 1, id, ty, recipient, auxData])`,
+   * where `recipient` is the predicate's own tagged CBOR encoding, byte for byte
+   * as the mint transaction carries it.
    *
    * @param {TokenId} tokenId Token id of the lineage.
    * @param {TokenType} tokenType Token type.
+   * @param {EncodedPredicate} recipient Recipient predicate of the mint.
    * @param {Uint8Array} auxData Exact auxiliary data bytes of the mint.
    * @returns {Promise<DataHash>} Message hash.
    */
-  public static signedMessage(tokenId: TokenId, tokenType: TokenType, auxData: Uint8Array): Promise<DataHash> {
+  public static signedMessage(
+    tokenId: TokenId,
+    tokenType: TokenType,
+    recipient: EncodedPredicate,
+    auxData: Uint8Array,
+  ): Promise<DataHash> {
     return new DataHasher(HashAlgorithm.SHA256)
       .update(
         CborSerializer.encodeArray(
@@ -272,6 +288,7 @@ export class LineageGenesisReason {
           CborSerializer.encodeUnsignedInteger(LINEAGE_REASON_VERSION),
           CborSerializer.encodeByteString(tokenId.bytes),
           CborSerializer.encodeByteString(tokenType.bytes),
+          recipient.toCBOR(),
           CborSerializer.encodeByteString(auxData),
         ),
       )
@@ -293,12 +310,18 @@ export class LineageGenesisReason {
   /**
    * @param {TokenId} tokenId Token id of the lineage.
    * @param {TokenType} tokenType Token type.
+   * @param {EncodedPredicate} recipient Recipient predicate of the mint.
    * @param {Uint8Array} auxData Exact auxiliary data bytes of the mint.
    * @returns {Promise<boolean>} True if the signature verifies for the issuer.
    */
-  public async verify(tokenId: TokenId, tokenType: TokenType, auxData: Uint8Array): Promise<boolean> {
+  public async verify(
+    tokenId: TokenId,
+    tokenType: TokenType,
+    recipient: EncodedPredicate,
+    auxData: Uint8Array,
+  ): Promise<boolean> {
     return SigningService.verifyWithPublicKey(
-      await LineageGenesisReason.signedMessage(tokenId, tokenType, auxData),
+      await LineageGenesisReason.signedMessage(tokenId, tokenType, recipient, auxData),
       this.signature,
       this._issuer,
     );

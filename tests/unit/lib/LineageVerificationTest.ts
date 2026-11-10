@@ -1,5 +1,6 @@
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
+import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import type { IPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/IPredicate.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
@@ -27,6 +28,7 @@ describe('LineageVerification', () => {
 
   const alice = SigningService.generatePrivateKey();
   const bob = SigningService.generatePrivateKey();
+  const carol = SigningService.generatePrivateKey();
   const publicKey = (key: Uint8Array): Uint8Array => new SigningService(key).publicKey;
 
   /**
@@ -54,11 +56,24 @@ describe('LineageVerification', () => {
     );
   }
 
-  /** A genesis with a valid issuer signature over `data`, minted to `recipient`. */
-  async function signedGenesis(data: Uint8Array, recipient: IPredicate): Promise<Token> {
+  /**
+   * A genesis with an issuer signature over `data` and `signedRecipient`, minted
+   * to `recipient`; the signature is valid when the two are the same predicate.
+   */
+  async function signedGenesis(
+    data: Uint8Array,
+    recipient: IPredicate,
+    signedRecipient: IPredicate = recipient,
+  ): Promise<Token> {
     const salt = TokenSalt.generate();
     const tokenId = await TokenId.fromSalt(trustBase.networkId, salt);
-    const reason = await LineageGenesisReason.sign(tokenId, LINEAGE_TOKEN_TYPE, data, new SigningService(alice));
+    const reason = await LineageGenesisReason.sign(
+      tokenId,
+      LINEAGE_TOKEN_TYPE,
+      EncodedPredicate.fromPredicate(signedRecipient),
+      data,
+      new SigningService(alice),
+    );
     return rawLineageToken(recipient, { data, justification: reason.toCBOR(), salt });
   }
 
@@ -66,12 +81,54 @@ describe('LineageVerification', () => {
     it('rejects a genesis whose issuer signature covers another token', async () => {
       const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
       const otherId = await TokenId.fromSalt(trustBase.networkId, TokenSalt.generate());
-      const reason = await LineageGenesisReason.sign(otherId, LINEAGE_TOKEN_TYPE, data, new SigningService(alice));
-      const token = await rawLineageToken(SignaturePredicate.create(publicKey(bob)), {
+      const recipient = SignaturePredicate.create(publicKey(bob));
+      const reason = await LineageGenesisReason.sign(
+        otherId,
+        LINEAGE_TOKEN_TYPE,
+        EncodedPredicate.fromPredicate(recipient),
+        data,
+        new SigningService(alice),
+      );
+      const token = await rawLineageToken(recipient, {
         data,
         justification: reason.toCBOR(),
       });
       const result = await verifyLineage(token, trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Issuer signature in the genesis reason does not verify.');
+    });
+
+    it('accepts a genesis minted to the recipient the issuer signed for', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+      const result = await verifyLineage(
+        await signedGenesis(data, SignaturePredicate.create(publicKey(bob))),
+        trustBase,
+      );
+      expect(result.reason).toBeNull();
+      expect(result.status).toEqual('OK');
+    });
+
+    // A delegated mint: the issuer signs for bob, whoever submits the mint names carol.
+    it('rejects a genesis minted to another recipient than the issuer signed for', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+      const result = await verifyLineage(
+        await signedGenesis(
+          data,
+          SignaturePredicate.create(publicKey(carol)),
+          SignaturePredicate.create(publicKey(bob)),
+        ),
+        trustBase,
+      );
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Issuer signature in the genesis reason does not verify.');
+    });
+
+    it('rejects a genesis burned at once when the issuer signed for a producer', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST, true).toCBOR();
+      const result = await verifyLineage(
+        await signedGenesis(data, await sealPredicate(data), SignaturePredicate.create(publicKey(bob))),
+        trustBase,
+      );
       expect(result.status).toEqual('FAIL');
       expect(result.reason).toEqual('Issuer signature in the genesis reason does not verify.');
     });

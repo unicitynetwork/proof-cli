@@ -78,7 +78,7 @@ export class LineageIssuanceVerifier implements ITokenIssuanceVerifier {
   }
 }
 
-/** Checks the issuer signature in a lineage genesis reason. */
+/** Checks the issuer signature in a lineage genesis reason, over the mint's own id, type, recipient and auxData. */
 export class LineageGenesisReasonVerifier implements IMintJustificationVerifier {
   public static readonly RULE = 'LineageGenesisReasonVerification';
 
@@ -99,7 +99,7 @@ export class LineageGenesisReasonVerifier implements IMintJustificationVerifier 
         results.push(
           check(
             'IssuerSignatureValid',
-            await reason.verify(transaction.tokenId, transaction.tokenType, data),
+            await reason.verify(transaction.tokenId, transaction.tokenType, transaction.recipient, data),
             'Issuer signature in the genesis reason does not verify.',
           ),
         );
