@@ -71,7 +71,9 @@ export function toExitCode(error: unknown, interrupted = false): number {
     return EXIT_VERIFICATION_FAILED;
   }
   if (error instanceof LineageError) {
-    return error.code === 'INVALID_TOKEN' || error.code === 'ALREADY_CERTIFIED' ? EXIT_VERIFICATION_FAILED : EXIT_USAGE;
+    return error.code === 'INVALID_TOKEN' || error.code === 'ALREADY_CERTIFIED' || error.code === 'SUPERSEDED'
+      ? EXIT_VERIFICATION_FAILED
+      : EXIT_USAGE;
   }
   return EXIT_USAGE;
 }

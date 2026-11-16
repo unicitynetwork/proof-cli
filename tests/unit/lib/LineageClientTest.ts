@@ -20,8 +20,10 @@ import {
   appendRevision,
   certifyRevision,
   createLineage,
+  createOrRecoverLineage,
   currentProducerKey,
   deriveGenesisSalt,
+  findSuccessor,
   isFinalized,
   isSameRevision,
   LineageError,
@@ -74,6 +76,39 @@ class LateRoundClient implements IAggregatorClient {
 
   public submitCertificationRequest(): Promise<CertificationResponse> {
     return Promise.resolve(CertificationResponse.create(STATE_ID_EXISTS_STATUS));
+  }
+}
+
+/** Shows nothing on the first `misses` proof lookups, as if the earlier request were still in its round. */
+class MissingLookupsClient implements IAggregatorClient {
+  private lookups = 0;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly misses: number,
+  ) {}
+
+  public async getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    this.lookups += 1;
+    const response = await this.inner.getInclusionProof(stateId);
+    return this.lookups <= this.misses
+      ? InclusionProofResponse.notCertified(1n, response.unicityCertificate)
+      : response;
+  }
+
+  public submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
+    return this.inner.submitCertificationRequest(certificationData);
+  }
+}
+
+/** Fails every proof lookup, so a test can see that none was made. */
+class NoLookupClient implements IAggregatorClient {
+  public getInclusionProof(): Promise<InclusionProofResponse> {
+    return Promise.reject(new Error('no lookup expected'));
+  }
+
+  public submitCertificationRequest(): Promise<CertificationResponse> {
+    return Promise.reject(new Error('no submission expected'));
   }
 }
 
@@ -291,6 +326,72 @@ describe('LineageClient', () => {
     await expect(
       appendRevision(client, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), fast),
     ).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+  });
+
+  describe('recovering a genesis', () => {
+    it('tells a fresh genesis from one an earlier run certified, which it recovers without submitting', async () => {
+      const fresh = await createOrRecoverLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      expect(fresh.recovered).toBe(false);
+      const submissions = counting.submissions;
+      const again = await createOrRecoverLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      expect(again.recovered).toBe(true);
+      expect(counting.submissions).toBe(submissions);
+      expect(HexConverter.encode(again.token.id.bytes)).toEqual(HexConverter.encode(fresh.token.id.bytes));
+    });
+
+    // One miss: the lookup before submitting. Two: the one after STATE_ID_EXISTS too,
+    // so the proof only arrives while waiting for it.
+    it.each([1, 2])('counts STATE_ID_EXISTS for this very mint as a recovery (%i missed lookups)', async (misses) => {
+      await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const missing = new StateTransitionClient(new MissingLookupsClient(aggregator, misses));
+      const replays: string[] = [];
+      const again = await createOrRecoverLineage(missing, trustBase, TEST_DIGEST, alice, publicKey(bob), {
+        ...fast,
+        onAlreadyCertified: () => replays.push('genesis'),
+      });
+      expect(again.recovered).toBe(true);
+      expect(replays).toEqual(['genesis']);
+    });
+
+    it('reports a replayed append through onAlreadyCertified, and a fresh one not', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const replays: number[] = [];
+      const options = { ...fast, onAlreadyCertified: (): number => replays.push(1) };
+      await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), options);
+      expect(replays).toEqual([]);
+      await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), options);
+      expect(replays).toEqual([1]);
+    });
+  });
+
+  describe('findSuccessor', () => {
+    it('finds no successor until the next revision is certified, then proves it', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      expect(await findSuccessor(client, trustBase, genesis)).toEqual({ kind: 'none' });
+
+      const next = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
+      const lookup = await findSuccessor(client, trustBase, genesis);
+      expect(lookup.kind).toEqual('spent');
+      expect(lookup.kind === 'spent' && lookup.proof.referenceTime).toBe(next.transactions[0].referenceTime);
+      // The lookup follows the token's own tip.
+      expect(await findSuccessor(client, trustBase, next)).toEqual({ kind: 'none' });
+    });
+
+    it('does not look up a finalized lineage, which nothing can follow', async () => {
+      const sealed = await createLineage(client, trustBase, TEST_DIGEST, alice, null, fast);
+      const nobody = new StateTransitionClient(new NoLookupClient());
+      expect(await findSuccessor(nobody, trustBase, sealed)).toEqual({ kind: 'none' });
+    });
+
+    it('does not believe a proof that does not verify against the trust base', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const elsewhere = TestAggregatorClient.create();
+      const forged = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      await elsewhere.submitCertificationRequest(forged.certificationData);
+      const forging = new StateTransitionClient(elsewhere);
+      expect(await findSuccessor(forging, trustBase, genesis)).toEqual({ kind: 'unverified' });
+      expect((await findSuccessor(forging, elsewhere.rootTrustBase, genesis)).kind).toEqual('spent');
+    });
   });
 
   describe('finalization', () => {

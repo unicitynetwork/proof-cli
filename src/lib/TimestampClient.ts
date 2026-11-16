@@ -29,6 +29,11 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 export const DEFAULT_POLL_INTERVAL_MS = 1_000;
 
 export interface ICertifyOptions {
+  /**
+   * Called when the aggregator already held this very transaction, submitted by an
+   * earlier run: the proof returned is that run's, and nothing new was certified.
+   */
+  readonly onAlreadyCertified?: () => void;
   /** Called for conditions that do not stop the stamp, such as an unknown aggregator status. */
   readonly onWarning?: (message: string) => void;
   /** Delay between inclusion-proof polls. Default {@link DEFAULT_POLL_INTERVAL_MS}. */
@@ -149,6 +154,7 @@ export async function certifyTransaction(
   if (exists) {
     const proof = await findCertifiedProof(client, context, transaction, options.signal);
     if (proof !== null) {
+      options.onAlreadyCertified?.();
       return proof;
     }
   } else if (response.status !== SUCCESS_STATUS) {
@@ -165,7 +171,7 @@ export async function certifyTransaction(
     signals.push(options.signal);
   }
   try {
-    return await waitInclusionProof(
+    const proof = await waitInclusionProof(
       client,
       context.trustBase,
       context.predicateVerifier,
@@ -174,6 +180,11 @@ export async function certifyTransaction(
       AbortSignal.any(signals),
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     );
+    if (exists) {
+      // The earlier request for this state was this transaction, certified in its own round.
+      options.onAlreadyCertified?.();
+    }
+    return proof;
   } catch (error) {
     // The earlier request was still waiting for its round. The SDK reports a proof
     // of another transaction only as a plain Error, so look again to say what it is.

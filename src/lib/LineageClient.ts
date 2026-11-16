@@ -1,6 +1,8 @@
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
+import { JsonRpcNetworkError } from '@unicitylabs/state-transition-sdk/lib/api/json-rpc/JsonRpcNetworkError.js';
+import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
@@ -16,6 +18,10 @@ import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.j
 import { TokenId } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenId.js';
 import { TokenSalt } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenSalt.js';
 import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
+import {
+  InclusionProofVerificationRule,
+  InclusionProofVerificationStatus,
+} from '@unicitylabs/state-transition-sdk/lib/transaction/verification/rule/InclusionProofVerificationRule.js';
 import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/TypedArrayUtils.js';
 
 import { StateAlreadyCertifiedError } from './errors.js';
@@ -27,7 +33,7 @@ import {
   sealPredicate,
 } from './LineagePayload.js';
 import { createLineageVerificationContext, verifyLineage } from './LineageVerification.js';
-import { ICertifyOptions, certifyMintTransaction, certifyTransaction, findCertifiedProof } from './TimestampClient.js';
+import { ICertifyOptions, certifyTransaction, findCertifiedProof } from './TimestampClient.js';
 
 /** Thrown when a revision cannot be appended to the given token with the given key. */
 export class LineageError extends Error {
@@ -36,9 +42,10 @@ export class LineageError extends Error {
     /**
      * `INVALID_TOKEN`: the token does not verify as a lineage; `WRONG_KEY`: the key
      * cannot append to it; `FINALIZED`: the lineage is sealed and nothing can;
-     * `ALREADY_CERTIFIED`: this revision slot was already certified with other content.
+     * `ALREADY_CERTIFIED`: this revision slot was already certified with other content;
+     * `SUPERSEDED`: a recovered genesis whose lineage has moved on since.
      */
-    public readonly code: 'ALREADY_CERTIFIED' | 'FINALIZED' | 'INVALID_TOKEN' | 'WRONG_KEY',
+    public readonly code: 'ALREADY_CERTIFIED' | 'FINALIZED' | 'INVALID_TOKEN' | 'SUPERSEDED' | 'WRONG_KEY',
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -186,6 +193,26 @@ export async function createLineage(
   nextProducer: Uint8Array | null,
   options: ICertifyOptions = {},
 ): Promise<Token> {
+  return (await createOrRecoverLineage(client, trustBase, digest, issuerPrivateKey, nextProducer, options)).token;
+}
+
+/**
+ * Build, without network contact, the genesis of a lineage. Deterministic in its
+ * inputs: the salt is derived ({@link deriveGenesisSalt}) and the issuer's
+ * signature is deterministic, so the same inputs always give the same mint.
+ *
+ * @param {RootTrustBase} trustBase Trust base of the network to mint on.
+ * @param {Uint8Array} digest 32-byte SHA-256 digest of the initial revision.
+ * @param {Uint8Array} issuerPrivateKey Issuer's private key; signs the genesis reason.
+ * @param {Uint8Array|null} nextProducer Compressed public key of whoever produces revision 1; null to finalize.
+ * @returns {Promise<MintTransaction>} The mint.
+ */
+export async function prepareLineage(
+  trustBase: RootTrustBase,
+  digest: Uint8Array,
+  issuerPrivateKey: Uint8Array,
+  nextProducer: Uint8Array | null,
+): Promise<MintTransaction> {
   const { auxData, recipient } = await revisionStep(0n, digest, nextProducer);
   const encodedRecipient = EncodedPredicate.fromPredicate(recipient);
   const salt = await deriveGenesisSalt(issuerPrivateKey, encodedRecipient, auxData);
@@ -197,14 +224,146 @@ export async function createLineage(
     auxData,
     new SigningService(issuerPrivateKey),
   );
-  const transaction = await MintTransaction.create(trustBase.networkId, recipient, {
+  return MintTransaction.create(trustBase.networkId, recipient, {
     data: auxData,
     justification: reason.toCBOR(),
     salt,
     tokenType: LINEAGE_TOKEN_TYPE,
   });
+}
+
+/** A genesis, and whether an earlier run had already certified it. */
+export interface ILineageGenesis {
+  /**
+   * True when this genesis was certified before this call: by an interrupted run,
+   * or by a run whose token file is elsewhere. The token is then revision 0 of an
+   * existing lineage, which may have moved on since ({@link findSuccessor}).
+   */
+  readonly recovered: boolean;
+  readonly token: Token;
+}
+
+/**
+ * Create a lineage, or recover it if this genesis was already certified.
+ *
+ * The aggregator is asked first whether it holds this very mint; if so, nothing is
+ * submitted. Otherwise the mint is submitted, and a `STATE_ID_EXISTS` answer for it
+ * (an earlier request still waiting for its round when this one looked) counts as a
+ * recovery too. A gateway that answers a repeat as a fresh success is caught by the
+ * first check, unless the repeat comes within the earlier request's round.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the network behind the client.
+ * @param {Uint8Array} digest 32-byte SHA-256 digest of the initial revision.
+ * @param {Uint8Array} issuerPrivateKey Issuer's private key; signs the genesis reason.
+ * @param {Uint8Array|null} nextProducer Compressed public key of whoever produces revision 1; null to finalize.
+ * @param {ICertifyOptions} options Timeout, poll interval, abort signal, warning sink.
+ * @returns {Promise<ILineageGenesis>} Verified lineage token with no transfers, and whether it was recovered.
+ */
+export async function createOrRecoverLineage(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  digest: Uint8Array,
+  issuerPrivateKey: Uint8Array,
+  nextProducer: Uint8Array | null,
+  options: ICertifyOptions = {},
+): Promise<ILineageGenesis> {
+  const transaction = await prepareLineage(trustBase, digest, issuerPrivateKey, nextProducer);
   const context = createLineageVerificationContext(trustBase);
-  return Token.mint(await certifyMintTransaction(client, context, transaction, options), context);
+  let recovered = false;
+  let proof = await findCertifiedProof(client, context, transaction, options.signal);
+  if (proof !== null) {
+    recovered = true;
+  } else {
+    proof = await certifyTransaction(
+      client,
+      context,
+      await CertificationData.fromMintTransaction(transaction),
+      transaction,
+      {
+        ...options,
+        onAlreadyCertified: (): void => {
+          recovered = true;
+          options.onAlreadyCertified?.();
+        },
+      },
+    );
+  }
+  const certified = await transaction.toCertifiedTransaction(
+    context.trustBase,
+    context.predicateVerifier,
+    context.unicityCertificateVerifier,
+    proof,
+  );
+  return { recovered, token: await Token.mint(certified, context) };
+}
+
+/**
+ * What the aggregator says about the state a token ends in: `spent`, with an
+ * authenticated proof of the transfer that spent it; `unverified`, when it showed a
+ * proof that does not verify; `none`, when it showed nothing. `none` is not proof
+ * that no later revision exists: the aggregator issues no proofs of absence, and a
+ * gateway can withhold one.
+ */
+export type SuccessorLookup =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'spent'; readonly proof: InclusionProof }
+  | { readonly kind: 'unverified' };
+
+/**
+ * Ask the aggregator whether the state the token ends in has been spent, that is,
+ * whether the lineage has a revision after the token's latest one. Needs no key
+ * and submits nothing: the next revision's state id depends only on the latest
+ * state and the predicate locking it, both in the token. Its content cannot be
+ * learned, since the aggregator holds only the transfer's hash.
+ *
+ * A proof is believed only once it verifies against the trust base: its path, the
+ * consensus signatures over its round, and the signature of the key the latest
+ * state is locked to, over the transfer it certifies.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the network behind the client.
+ * @param {Token} token Lineage token.
+ * @param {AbortSignal} [signal] Abort signal for the request.
+ * @returns {Promise<SuccessorLookup>} What the aggregator showed.
+ */
+export async function findSuccessor(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  token: Token,
+  signal?: AbortSignal,
+): Promise<SuccessorLookup> {
+  if (isFinalized(token)) {
+    // Locked to a burn predicate, which nothing can unlock.
+    return { kind: 'none' };
+  }
+  // The state id of any transfer out of the latest state; the probe's recipient
+  // and mask do not enter it.
+  const probe = await TransferTransaction.create(token, BurnPredicate.create(new Uint8Array(32)), StateMask.generate());
+  let proof: InclusionProof | null;
+  try {
+    proof = (await client.getInclusionProof(await StateId.fromTransaction(probe), { signal })).inclusionProof;
+  } catch (error) {
+    if (error instanceof JsonRpcNetworkError && error.status === 404) {
+      return { kind: 'none' };
+    }
+    throw error;
+  }
+  if (proof === null) {
+    return { kind: 'none' };
+  }
+  const context = createLineageVerificationContext(trustBase);
+  const result = await InclusionProofVerificationRule.verify(
+    context.trustBase,
+    context.predicateVerifier,
+    context.unicityCertificateVerifier,
+    proof,
+    proof.certificationData.transactionHash,
+    proof.certificationData.expiresAt,
+    probe.lockScript,
+    probe.sourceStateHash,
+  );
+  return result.status === InclusionProofVerificationStatus.OK ? { kind: 'spent', proof } : { kind: 'unverified' };
 }
 
 /**

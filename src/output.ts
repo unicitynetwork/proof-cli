@@ -378,6 +378,11 @@ export interface IRevisionSummary {
   readonly networkId: number;
   /** Null when the revision finalized the lineage. */
   readonly nextProducer: Uint8Array | null;
+  /**
+   * True when an earlier run had already certified this revision and this run only
+   * recovered it; for a genesis, the lineage is then an existing one, not a new one.
+   */
+  readonly recovered: boolean;
   readonly referenceTime: bigint;
   readonly revision: bigint;
   readonly roundNumber: bigint;
@@ -396,6 +401,8 @@ export interface IRevisionJson {
   readonly network: INetworkJson & { readonly gateway: string };
   /** Null when the revision finalized the lineage. */
   readonly nextProducer: string | null;
+  /** True when an earlier run had already certified this revision; see {@link IRevisionSummary.recovered}. */
+  readonly recovered: boolean;
   readonly referenceTime: string;
   readonly referenceTimeIso: string | null;
   readonly revision: string;
@@ -407,14 +414,25 @@ export interface IRevisionJson {
 
 /**
  * @param {IRevisionSummary} summary The certified revision.
+ * @returns {string} The marks after the revision number: how it came about, and whether it is final.
+ */
+function revisionMarks(summary: IRevisionSummary): string {
+  let origin = '';
+  if (summary.created) {
+    origin = summary.recovered ? '  (existing lineage, recovered)' : '  (new lineage)';
+  } else if (summary.recovered) {
+    origin = '  (recovered)';
+  }
+  return `${origin}${summary.nextProducer === null ? '  (final)' : ''}`;
+}
+
+/**
+ * @param {IRevisionSummary} summary The certified revision.
  * @returns {string} Human summary of a `stamp-revision`.
  */
 export function revisionText(summary: IRevisionSummary): string {
   return [
-    line(
-      'Revision',
-      `${summary.revision}${summary.created ? '  (new lineage)' : ''}${summary.nextProducer === null ? '  (final)' : ''}`,
-    ),
+    line('Revision', `${summary.revision}${revisionMarks(summary)}`),
     line('Stamped', `SHA-256 ${HexConverter.encode(summary.digest)}`),
     line('Network', `${networkLabel(summary.networkId)} via ${summary.gatewayUrl}`),
     line('Signed by', HexConverter.encode(summary.signer)),
@@ -441,6 +459,7 @@ export function revisionJson(summary: IRevisionSummary): IRevisionJson {
     hash: { algorithm: 'SHA-256', digest: HexConverter.encode(summary.digest) },
     network: { gateway: summary.gatewayUrl, id: summary.networkId, name: networkName(summary.networkId) },
     nextProducer: summary.nextProducer === null ? null : HexConverter.encode(summary.nextProducer),
+    recovered: summary.recovered,
     referenceTime: summary.referenceTime.toString(),
     referenceTimeIso: toIso(summary.referenceTime),
     revision: summary.revision.toString(),
@@ -508,6 +527,45 @@ export function pendingRevisionLines(note: IPendingRevisionNote, context: Pendin
  */
 export function recoveredRevisionLine(revision: bigint, journalFile: string): string {
   return `Recovered revision ${revision} from the journal ${journalFile} of an interrupted run.\n`;
+}
+
+const SEPARATE_LINEAGE_HINT =
+  'To start a separate lineage from the same document, name a different first producer ' +
+  '(or sign with a different issuer key).';
+
+/**
+ * Note for stderr after a genesis that an earlier run had already certified.
+ *
+ * @param {Uint8Array} tokenId The existing lineage's token id.
+ * @returns {string} Note, ending in a newline.
+ */
+export function existingLineageNote(tokenId: Uint8Array): string {
+  return (
+    'This genesis was already certified: the token file holds revision 0 of the existing lineage ' +
+    `${HexConverter.encode(tokenId)}, not a new one. ${SEPARATE_LINEAGE_HINT}\n`
+  );
+}
+
+/**
+ * Why a recovered genesis was not written: the lineage has moved on.
+ *
+ * @param {Uint8Array} tokenId The lineage's token id.
+ * @param {bigint} referenceTime When revision 1 was certified.
+ * @param {Uint8Array|null} producer Who revision 0 passed to, and so who signed revision 1.
+ * @returns {string} Error message.
+ */
+export function supersededLineageMessage(
+  tokenId: Uint8Array,
+  referenceTime: bigint,
+  producer: Uint8Array | null,
+): string {
+  const by = producer === null ? '' : ` by the next producer ${HexConverter.encode(producer)}`;
+  return (
+    `Revision 0 of lineage ${HexConverter.encode(tokenId)} was certified by an earlier run, and the lineage has ` +
+    `moved on: revision 1 was certified at ${formatIso(referenceTime)}${by}. A token file holding only revision 0 ` +
+    'would be out of date, so none was written. Get the current token file from whoever holds the lineage; the ' +
+    `token id above still identifies the lineage. ${SEPARATE_LINEAGE_HINT}`
+  );
 }
 
 /**

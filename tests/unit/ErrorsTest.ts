@@ -32,6 +32,7 @@ describe('toExitCode', () => {
     ['token failed SDK verification', new VerificationError('bad token', failed), 1],
     ['not a valid lineage token', new LineageError('x', 'INVALID_TOKEN'), 1],
     ['lineage revision slot already taken', new LineageError('x', 'ALREADY_CERTIFIED'), 1],
+    ['recovered genesis whose lineage moved on', new LineageError('x', 'SUPERSEDED'), 1],
     ['wrong key for the lineage', new LineageError('x', 'WRONG_KEY'), 2],
     ['finalized lineage', new LineageError('x', 'FINALIZED'), 2],
     ['file not found', errno('ENOENT', '/x'), 2],

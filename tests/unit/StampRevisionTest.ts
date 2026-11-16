@@ -6,6 +6,7 @@ import { CertificationResponse } from '@unicitylabs/state-transition-sdk/lib/api
 import type { IAggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/IAggregatorClient.js';
 import { InclusionProofResponse } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProofResponse.js';
 import { JsonRpcNetworkError } from '@unicitylabs/state-transition-sdk/lib/api/json-rpc/JsonRpcNetworkError.js';
+import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
@@ -14,14 +15,17 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { stampRevisionWith } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
+import { appendRevision, prepareRevision } from '../../src/lib/LineageClient.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
 import {
+  existingLineageNote,
   IRevisionSummary,
   pendingRevisionLines,
   recoveredRevisionLine,
   revisionJson,
   revisionRecoveryLines,
   revisionText,
+  supersededLineageMessage,
 } from '../../src/output.js';
 import { testContext } from '../support/context.js';
 import {
@@ -41,6 +45,28 @@ class InterruptingClient implements IAggregatorClient {
 
   public getInclusionProof(): Promise<InclusionProofResponse> {
     return Promise.reject(new JsonRpcNetworkError(502, 'bad gateway'));
+  }
+
+  public submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
+    return this.inner.submitCertificationRequest(certificationData);
+  }
+}
+
+type Lookup = (stateId: StateId) => Promise<InclusionProofResponse>;
+
+/** Answers the n-th proof lookup with the n-th scripted answer, and the rest from the aggregator. */
+class ScriptedLookupClient implements IAggregatorClient {
+  private lookups = 0;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly script: (Lookup | null)[],
+  ) {}
+
+  public getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    const scripted = this.script[this.lookups];
+    this.lookups += 1;
+    return scripted ? scripted(stateId) : this.inner.getInclusionProof(stateId);
   }
 
   public submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
@@ -88,10 +114,12 @@ describe('stampRevisionWith', () => {
       created: true,
       hash: { algorithm: 'SHA-256', digest: TEST_DIGEST_HEX },
       nextProducer: HexConverter.encode(bobPublic),
+      recovered: false,
       revision: '0',
       signer: TEST_PUBLIC_KEY_HEX,
       tokenFile,
     });
+    expect(first.stderr()).toEqual('');
 
     const second = testContext();
     const tokenBytes = new Uint8Array(await readFile(tokenFile));
@@ -140,7 +168,8 @@ describe('stampRevisionWith', () => {
         text.context,
       ),
     ).toBe(0);
-    expect(text.stdout()).toContain('Revision       1  (final)\n');
+    // The same seal again: the aggregator already holds it, so this run only recovers it.
+    expect(text.stdout()).toContain('Revision       1  (recovered)  (final)\n');
     expect(text.stdout()).toContain('Next producer  none; the lineage is finalized');
 
     const attempt = stampRevisionWith(
@@ -179,6 +208,88 @@ describe('stampRevisionWith', () => {
     await expect(attempt).rejects.toThrow(/does not match the producer/);
     expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
     expect(await readFile(tokenFile)).toEqual(before);
+  });
+
+  describe('a genesis that was already certified', () => {
+    let tokenFile: string;
+    let genesisBytes: Uint8Array;
+    let tokenIdHex: string;
+
+    beforeEach(async () => {
+      tokenFile = path.join(directory, 'doc.lineage');
+      await stampRevisionWith(config({}), client, testContext().context);
+      genesisBytes = new Uint8Array(await readFile(tokenFile));
+      tokenIdHex = HexConverter.encode((await Token.fromCBOR(genesisBytes)).id.bytes);
+      await rm(tokenFile);
+    });
+
+    async function bobAppends(): Promise<void> {
+      const genesis = await Token.fromCBOR(genesisBytes);
+      await appendRevision(client, aggregator.rootTrustBase, genesis, OTHER_DIGEST, bob, bobPublic, {
+        pollIntervalMs: 10,
+      });
+    }
+
+    it('is recovered and written, marked as the existing lineage, with a note even under --quiet', async () => {
+      const sink = testContext({ json: true });
+      expect(await stampRevisionWith(config({ quiet: true }), client, sink.context)).toBe(0);
+      expect(sink.json()).toMatchObject({ created: true, recovered: true, revision: '0', tokenId: tokenIdHex });
+      expect(sink.stderr()).toEqual(existingLineageNote(HexConverter.decode(tokenIdHex)));
+      expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+
+      await rm(tokenFile);
+      const text = testContext();
+      await stampRevisionWith(config({}), client, text.context);
+      expect(text.stdout()).toContain('Revision       0  (existing lineage, recovered)\n');
+    });
+
+    it('is not written once the lineage has moved on, and the error says so', async () => {
+      await bobAppends();
+      const attempt = stampRevisionWith(config({ quiet: true }), client, testContext().context);
+      await expect(attempt).rejects.toMatchObject({ code: 'SUPERSEDED' });
+      const error = (await attempt.catch((caught: unknown) => caught)) as Error;
+      expect(toExitCode(error)).toBe(EXIT_VERIFICATION_FAILED);
+      expect(error.message).toContain(`Revision 0 of lineage ${tokenIdHex} was certified by an earlier run`);
+      expect(error.message).toContain(`by the next producer ${HexConverter.encode(bobPublic)}`);
+      expect(error.message).toContain('name a different first producer');
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    it('is written with a warning when the check for later revisions fails', async () => {
+      await bobAppends();
+      const failing = new StateTransitionClient(
+        new ScriptedLookupClient(aggregator, [
+          null,
+          (): Promise<InclusionProofResponse> => Promise.reject(new JsonRpcNetworkError(502, 'bad gateway')),
+        ]),
+      );
+      const sink = testContext();
+      expect(await stampRevisionWith(config({}), failing, sink.context)).toBe(0);
+      expect(sink.stderr()).toContain('warning: Could not check whether the lineage has later revisions: ');
+      expect(sink.stderr()).toContain('not a new one.');
+      // Revision 0 of the same lineage; its proof is now served under a later root.
+      const written = await Token.fromCBOR(new Uint8Array(await readFile(tokenFile)));
+      expect(HexConverter.encode(written.id.bytes)).toEqual(tokenIdHex);
+      expect(written.transactions).toHaveLength(0);
+    });
+
+    it('is written with a warning when the proof of a later revision does not verify', async () => {
+      // Revision 1 certified by an aggregator outside the trust base.
+      const elsewhere = TestAggregatorClient.create();
+      const genesis = await Token.fromCBOR(genesisBytes);
+      const forged = await prepareRevision(genesis, aggregator.rootTrustBase, OTHER_DIGEST, bob, bobPublic);
+      await elsewhere.submitCertificationRequest(forged.certificationData);
+      const forging = new StateTransitionClient(
+        new ScriptedLookupClient(aggregator, [
+          null,
+          (stateId): Promise<InclusionProofResponse> => elsewhere.getInclusionProof(stateId),
+        ]),
+      );
+      const sink = testContext();
+      expect(await stampRevisionWith(config({}), forging, sink.context)).toBe(0);
+      expect(sink.stderr()).toContain('warning: The gateway showed a proof of a later revision that does not verify');
+      expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+    });
   });
 
   describe('journal', () => {
@@ -249,7 +360,7 @@ describe('stampRevisionWith', () => {
       const sink = testContext();
       expect(await stampRevisionWith(append({ quiet: true }), client, sink.context)).toBe(0);
       expect(sink.stderr()).toEqual(`Recovered revision 1 from the journal ${journal} of an interrupted run.\n`);
-      expect(sink.stdout()).toContain('Revision       1\n');
+      expect(sink.stdout()).toContain('Revision       1  (recovered)\n');
       expect(await readdir(directory)).toEqual(['doc.lineage']);
       expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
     });
@@ -378,6 +489,7 @@ describe('stamp-revision output', () => {
     gatewayUrl: 'https://gateway.test',
     networkId: 4,
     nextProducer: next,
+    recovered: false,
     referenceTime: 1791200527n,
     revision: 2n,
     roundNumber: 184233n,
@@ -424,6 +536,7 @@ describe('stamp-revision output', () => {
       hash: { algorithm: 'SHA-256', digest: TEST_DIGEST_HEX },
       network: { gateway: 'https://gateway.test', id: 4, name: 'testnet2' },
       nextProducer: HexConverter.encode(next),
+      recovered: false,
       referenceTime: '1791200527',
       referenceTimeIso: '2026-10-05T11:42:07Z',
       revision: '2',
@@ -442,6 +555,41 @@ describe('stamp-revision output', () => {
       'error: the revision was certified but the token file could not be written.\n' +
         'Save the token below; `stamp-revision --token-file` accepts hex text.\n' +
         'd90100\n',
+    );
+  });
+
+  it('marks a recovered revision, and a recovered genesis as an existing lineage', () => {
+    expect(revisionText({ ...summary, recovered: true })).toContain('Revision       2  (recovered)\n');
+    expect(revisionText({ ...summary, nextProducer: null, recovered: true })).toContain(
+      'Revision       2  (recovered)  (final)\n',
+    );
+    expect(revisionText({ ...summary, created: true, recovered: true, revision: 0n })).toContain(
+      'Revision       0  (existing lineage, recovered)\n',
+    );
+    expect(revisionText({ ...summary, created: true, revision: 0n })).toContain('Revision       0  (new lineage)\n');
+    expect(revisionJson({ ...summary, recovered: true }).recovered).toBe(true);
+  });
+
+  it('says a recovered genesis is an existing lineage, and how to start a separate one', () => {
+    expect(existingLineageNote(new Uint8Array(32).fill(0xaa))).toEqual(
+      `This genesis was already certified: the token file holds revision 0 of the existing lineage ${'aa'.repeat(32)}, ` +
+        'not a new one. To start a separate lineage from the same document, name a different first producer ' +
+        '(or sign with a different issuer key).\n',
+    );
+  });
+
+  it('explains a superseded genesis: when the lineage moved on, to whom, and what still holds', () => {
+    const message = supersededLineageMessage(new Uint8Array(32).fill(0xaa), 1791200527n, producer);
+    expect(message).toEqual(
+      `Revision 0 of lineage ${'aa'.repeat(32)} was certified by an earlier run, and the lineage has moved on: ` +
+        `revision 1 was certified at 2026-10-05T11:42:07Z by the next producer ${TEST_PUBLIC_KEY_HEX}. ` +
+        'A token file holding only revision 0 would be out of date, so none was written. Get the current token ' +
+        'file from whoever holds the lineage; the token id above still identifies the lineage. To start a ' +
+        'separate lineage from the same document, name a different first producer (or sign with a different ' +
+        'issuer key).',
+    );
+    expect(supersededLineageMessage(new Uint8Array(32), 1791200527n, null)).toContain(
+      'revision 1 was certified at 2026-10-05T11:42:07Z. A token file',
     );
   });
 

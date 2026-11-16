@@ -3,6 +3,7 @@ import { rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
+import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
@@ -24,25 +25,29 @@ import {
 import { decodeToken, tokenBytesFromInput } from './tokenInput.js';
 import { IStampRevisionConfig, IStampRevisionFlags, resolveStampRevisionConfig } from '../config.js';
 import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
-import { StampError } from '../lib/errors.js';
+import { errorMessage, StampError } from '../lib/errors.js';
 import {
   assertValidLineage,
   certifyRevision,
-  createLineage,
+  createOrRecoverLineage,
   currentProducerKey,
+  findSuccessor,
   isSameRevision,
   LineageError,
   prepareRevision,
   recoverRevision,
+  SuccessorLookup,
 } from '../lib/LineageClient.js';
 import { ICertifyOptions } from '../lib/TimestampClient.js';
 import {
+  existingLineageNote,
   PendingRevisionContext,
   pendingRevisionLines,
   recoveredRevisionLine,
   revisionJson,
   revisionRecoveryLines,
   revisionText,
+  supersededLineageMessage,
   toJsonLine,
   warningLine,
 } from '../output.js';
@@ -129,6 +134,8 @@ function recoveredOtherRevision(revision: bigint, token: Token, tokenFile: strin
 
 /** What an append produced. */
 interface IAppendOutcome {
+  /** True when an earlier run had certified the revision, and this run recovered it. */
+  readonly recovered: boolean;
   /** Key that signed the appended transfer. */
   readonly signer: Uint8Array;
   readonly token: Token;
@@ -177,7 +184,7 @@ async function appendJournaled(
     await removeJournal(journalFile);
     if (await isSameRevision(transaction, pending.revision, config.digest, config.recipientKey)) {
       context.stderr.write(recoveredRevisionLine(pending.revision, journalFile));
-      return { signer: currentProducerKey(token) as Uint8Array, token: recovered };
+      return { recovered: true, signer: currentProducerKey(token) as Uint8Array, token: recovered };
     }
     writePending(context, pending, journalFile, 'recovered');
     throw recoveredOtherRevision(pending.revision, recovered, config.tokenFile);
@@ -213,8 +220,14 @@ async function appendJournaled(
   }
 
   let appended: Token;
+  let replayed = false;
   try {
-    appended = await certifyRevision(client, trustBase, token, prepared, options);
+    appended = await certifyRevision(client, trustBase, token, prepared, {
+      ...options,
+      onAlreadyCertified: (): void => {
+        replayed = true;
+      },
+    });
   } catch (error) {
     if (error instanceof StampError) {
       // Refused outright: nothing was certified.
@@ -237,7 +250,51 @@ async function appendJournaled(
 
   await writeRevisionToken(config.tokenFile, appended.toCBOR(), false, context);
   await removeJournal(journalFile);
-  return { signer: new SigningService(config.privateKey).publicKey, token: appended };
+  return { recovered: replayed, signer: new SigningService(config.privateKey).publicKey, token: appended };
+}
+
+/**
+ * Refuse to hand out a recovered genesis whose lineage has moved on: a file with
+ * only revision 0 would be out of date, yet look like a fresh lineage. When the
+ * aggregator cannot be asked, or shows a proof that does not verify, the genesis
+ * is written anyway, with a warning: it is certified and correct, and losing a
+ * good recovery over a secondary check would be worse.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {Token} token The recovered genesis.
+ * @param {ICommandContext} context Streams and interrupt signal.
+ * @throws {LineageError} `SUPERSEDED` if the aggregator proves a later revision exists.
+ */
+async function assertNotSuperseded(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  token: Token,
+  context: ICommandContext,
+): Promise<void> {
+  let lookup: SuccessorLookup;
+  try {
+    lookup = await findSuccessor(client, trustBase, token, context.interrupt);
+  } catch (error) {
+    context.stderr.write(
+      warningLine(`Could not check whether the lineage has later revisions: ${errorMessage(error)}`),
+    );
+    return;
+  }
+  if (lookup.kind === 'spent') {
+    throw new LineageError(
+      supersededLineageMessage(token.id.bytes, lookup.proof.referenceTime, currentProducerKey(token)),
+      'SUPERSEDED',
+    );
+  }
+  if (lookup.kind === 'unverified') {
+    context.stderr.write(
+      warningLine(
+        'The gateway showed a proof of a later revision that does not verify; could not check whether the ' +
+          'lineage has moved on.',
+      ),
+    );
+  }
 }
 
 function latestCertified(token: Token): CertifiedMintTransaction | CertifiedTransferTransaction {
@@ -269,16 +326,31 @@ export async function stampRevisionWith(
 
   let token: Token;
   let signer = new SigningService(config.privateKey).publicKey;
+  let recovered: boolean;
   const created = config.tokenBytes === null;
   if (config.tokenBytes === null) {
-    token = await createLineage(client, trustBase, config.digest, config.privateKey, config.recipientKey, options);
+    ({ recovered, token } = await createOrRecoverLineage(
+      client,
+      trustBase,
+      config.digest,
+      config.privateKey,
+      config.recipientKey,
+      options,
+    ));
+    if (recovered) {
+      await assertNotSuperseded(client, trustBase, token, context);
+    }
     await writeRevisionToken(config.tokenFile, token.toCBOR(), true, context);
+    if (recovered) {
+      // Not subject to --quiet: without it, two files can pass for two lineages.
+      context.stderr.write(existingLineageNote(token.id.bytes));
+    }
   } else {
     const decoded = await decodeToken(tokenBytesFromInput(config.tokenBytes));
     if (decoded.token === null) {
       throw new CliError(`${config.tokenFile} is ${decoded.error}.`, EXIT_VERIFICATION_FAILED);
     }
-    ({ signer, token } = await appendJournaled(config, client, context, options, decoded.token));
+    ({ recovered, signer, token } = await appendJournaled(config, client, context, options, decoded.token));
   }
 
   const latest = latestCertified(token);
@@ -290,6 +362,7 @@ export async function stampRevisionWith(
     gatewayUrl: config.network.gatewayUrl,
     networkId: token.networkId.id,
     nextProducer: config.recipientKey,
+    recovered,
     referenceTime: latest.referenceTime,
     revision: BigInt(token.transactions.length),
     roundNumber: certificate.inputRecord.roundNumber,

@@ -67,6 +67,11 @@ without it the proof is gone.
   content` means an earlier run certified something else for this revision:
   only that run's digest and recipient recover it, and they are on stderr from
   when it was submitted.
+- **`(existing lineage, recovered)` means no new lineage was created.** The
+  same issuer key, document and first producer always give the same lineage.
+  If `stamp-revision` exits 1 saying `the lineage has moved on`, later
+  revisions exist: get the current token file from whoever holds the lineage
+  rather than creating it again.
 - `--sign` exits 2 unless a key is configured. Use it in any automated path that
   must never silently produce an anonymous stamp. `--anonymous` forces the
   opposite.
@@ -82,7 +87,7 @@ about foresight.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
-| `1` | Verification failed, hash or token id mismatch, or the input is not a token. For `stamp-revision`: the revision was already certified with different content. |
+| `1` | Verification failed, hash or token id mismatch, or the input is not a token. For `stamp-revision`: the revision was already certified with different content, or a recovered genesis's lineage has moved on. |
 | `2` | Usage or configuration error. |
 | `3` | Network error, aggregator rejection, or timeout. |
 | `130` | Interrupted. |
