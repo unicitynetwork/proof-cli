@@ -2,7 +2,10 @@ import { lstat, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import path from 'node:path';
 
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
-import { CertificationResponse } from '@unicitylabs/state-transition-sdk/lib/api/CertificationResponse.js';
+import {
+  CertificationResponse,
+  CertificationStatus,
+} from '@unicitylabs/state-transition-sdk/lib/api/CertificationResponse.js';
 import type { IAggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/IAggregatorClient.js';
 import { InclusionProofResponse } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProofResponse.js';
 import { JsonRpcNetworkError } from '@unicitylabs/state-transition-sdk/lib/api/json-rpc/JsonRpcNetworkError.js';
@@ -11,6 +14,7 @@ import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/sec
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
+import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 
 import { networkMismatch, stampRevisionWith } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig } from '../../src/config.js';
@@ -50,6 +54,71 @@ class InterruptingClient implements IAggregatorClient {
 
   public submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
     return this.inner.submitCertificationRequest(certificationData);
+  }
+}
+
+/** Loses every request before the aggregator sees it, but answers lookups. */
+class LostSubmitClient implements IAggregatorClient {
+  public constructor(private readonly inner: TestAggregatorClient) {}
+
+  public getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    return this.inner.getInclusionProof(stateId);
+  }
+
+  public submitCertificationRequest(): Promise<CertificationResponse> {
+    return Promise.reject(new JsonRpcNetworkError(502, 'bad gateway'));
+  }
+}
+
+/**
+ * Queues requests the way aggregator-go does. A state already certified is
+ * answered with STATE_ID_EXISTS; any other request, even a repeat for a state
+ * whose first request is still waiting for its round, gets SUCCESS. The round then
+ * certifies the first request for each state and silently drops the rest. With
+ * `roundOnRepeat`, the round runs at the first lookup after a repeat was admitted.
+ */
+class QueueingClient implements IAggregatorClient {
+  private readonly queue: { data: CertificationData; key: string }[] = [];
+  private roundDue = false;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly roundOnRepeat: boolean,
+  ) {}
+
+  private static async keyOf(data: CertificationData): Promise<string> {
+    return HexConverter.encode((await StateId.fromCertificationData(data)).data);
+  }
+
+  public async getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    if (this.roundDue) {
+      await this.runRound();
+    }
+    return this.inner.getInclusionProof(stateId);
+  }
+
+  public async runRound(): Promise<void> {
+    this.roundDue = false;
+    const certified = new Set<string>();
+    for (const { data, key } of this.queue.splice(0)) {
+      if (!certified.has(key)) {
+        certified.add(key);
+        await this.inner.submitCertificationRequest(data);
+      }
+    }
+  }
+
+  public async submitCertificationRequest(data: CertificationData): Promise<CertificationResponse> {
+    const stateId = await StateId.fromCertificationData(data);
+    if ((await this.inner.getInclusionProof(stateId)).inclusionProof !== null) {
+      return this.inner.submitCertificationRequest(data);
+    }
+    const key = await QueueingClient.keyOf(data);
+    if (this.roundOnRepeat && this.queue.some((queued) => queued.key === key)) {
+      this.roundDue = true;
+    }
+    this.queue.push({ data, key });
+    return CertificationResponse.create(CertificationStatus.SUCCESS);
   }
 }
 
@@ -302,7 +371,8 @@ describe('stampRevisionWith', () => {
 
     beforeEach(async () => {
       tokenFile = path.join(directory, 'doc.lineage');
-      journal = path.join(directory, '.doc.lineage.pending');
+      // Where a test writes a journal by hand; a run names its own after its transfer.
+      journal = path.join(directory, '.doc.lineage.0000000000000000.pending');
       await stampRevisionWith(config({}), client, testContext().context);
       genesisBytes = new Uint8Array(await readFile(tokenFile));
     });
@@ -320,8 +390,17 @@ describe('stampRevisionWith', () => {
     async function interrupted(): Promise<void> {
       const interrupting = new StateTransitionClient(new InterruptingClient(aggregator));
       await expect(stampRevisionWith(append(), interrupting, testContext().context)).rejects.toThrow(/bad gateway/);
-      expect(await readdir(directory)).toEqual(['.doc.lineage.pending', 'doc.lineage']);
+      const journals = await journalFiles();
+      expect(journals).toHaveLength(1);
+      journal = journals[0];
+      expect(await readdir(directory)).toEqual([path.basename(journal), 'doc.lineage']);
       expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+    }
+
+    async function journalFiles(): Promise<string[]> {
+      return (await readdir(directory))
+        .filter((name) => /^\.doc\.lineage\.[0-9a-f]{16}\.pending$/.test(name))
+        .map((name) => path.join(directory, name));
     }
 
     async function revisions(): Promise<string[]> {
@@ -338,7 +417,7 @@ describe('stampRevisionWith', () => {
       expect(sink.stderr()).toContain('Submitting revision 1 of lineage ');
       expect(sink.stderr()).toContain(`Stamped        SHA-256 ${OTHER_DIGEST_HEX}`);
       expect(sink.stderr()).toContain(`Next producer  ${TEST_PUBLIC_KEY_HEX}`);
-      expect(sink.stderr()).toContain(`Journal        ${journal}`);
+      expect(sink.stderr()).toMatch(/Journal {8}\S+\/\.doc\.lineage\.[0-9a-f]{16}\.pending\n/);
       expect(await readdir(directory)).toEqual(['doc.lineage']);
     });
 
@@ -405,6 +484,105 @@ describe('stampRevisionWith', () => {
       // With the inputs the interrupted run used, the revision is recovered after all.
       expect(await stampRevisionWith(append(), client, testContext().context)).toBe(0);
       expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
+    });
+
+    describe('an earlier run whose outcome is not known yet', () => {
+      const UNRESOLVED = 'submitted by an earlier run and not certified yet:';
+
+      /** Run 1: bob's revision 1 (OTHER_DIGEST) is submitted, and the run times out while it is queued. */
+      async function timedOut(queueing: QueueingClient): Promise<void> {
+        const attempt = stampRevisionWith(
+          append({ quiet: true, timeoutMs: 300 }),
+          new StateTransitionClient(queueing),
+          testContext().context,
+        );
+        await expect(attempt).rejects.toBeInstanceOf(SleepError);
+        expect(await journalFiles()).toHaveLength(1);
+      }
+
+      // MastaP's reproduction on PR #16: run 2, with other inputs, used to delete run 1's
+      // journal, then lose its own request to run 1's and fail with a plain hash mismatch.
+      it("keeps its journal, and recovers its revision when the round certifies it instead of this run's", async () => {
+        const queueing = new QueueingClient(aggregator, true);
+        await timedOut(queueing);
+
+        const sink = testContext();
+        const attempt = stampRevisionWith(
+          append({ digest: TEST_DIGEST, quiet: true }),
+          new StateTransitionClient(queueing),
+          sink.context,
+        );
+        await expect(attempt).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+        expect(((await attempt.catch((error: unknown) => error)) as Error).message).toContain(
+          `recovered and written to ${tokenFile}; the requested revision was not appended`,
+        );
+        // Despite --quiet: the earlier run's revision while open, then this run's as rejected.
+        expect(sink.stderr()).toContain(UNRESOLVED);
+        expect(sink.stderr()).toContain('as this run submitted it (not certified)');
+        expect(sink.stderr()).toContain('Recovered revision 1 of lineage ');
+        expect(await journalFiles()).toEqual([]);
+        expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
+      });
+
+      it('keeps both journals when the second run times out too, and the next run recovers the certified one', async () => {
+        const queueing = new QueueingClient(aggregator, false);
+        await timedOut(queueing);
+        const sink = testContext();
+        await expect(
+          stampRevisionWith(
+            append({ digest: TEST_DIGEST, quiet: true, timeoutMs: 300 }),
+            new StateTransitionClient(queueing),
+            sink.context,
+          ),
+        ).rejects.toBeInstanceOf(SleepError);
+        expect(sink.stderr()).toContain(UNRESOLVED);
+        expect(sink.stderr()).toContain(`SHA-256 ${OTHER_DIGEST_HEX}`);
+        expect(await journalFiles()).toHaveLength(2);
+
+        await queueing.runRound();
+        const attempt = stampRevisionWith(append({ digest: TEST_DIGEST, quiet: true }), client, testContext().context);
+        await expect(attempt).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+        expect(await journalFiles()).toEqual([]);
+        expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
+      });
+
+      it("removes its journal once this run's revision is certified in its place", async () => {
+        await expect(
+          stampRevisionWith(
+            append({ quiet: true }),
+            new StateTransitionClient(new LostSubmitClient(aggregator)),
+            testContext().context,
+          ),
+        ).rejects.toThrow(/bad gateway/);
+        expect(await journalFiles()).toHaveLength(1);
+
+        const sink = testContext();
+        expect(await stampRevisionWith(append({ digest: TEST_DIGEST, quiet: true }), client, sink.context)).toBe(0);
+        expect(sink.stderr()).toContain(UNRESOLVED);
+        expect(await journalFiles()).toEqual([]);
+        expect(await revisions()).toEqual([TEST_DIGEST_HEX, TEST_DIGEST_HEX]);
+      });
+
+      it('removes its journal once a proof shows its slot holds another transfer', async () => {
+        await expect(
+          stampRevisionWith(
+            append({ quiet: true }),
+            new StateTransitionClient(new LostSubmitClient(aggregator)),
+            testContext().context,
+          ),
+        ).rejects.toThrow(/bad gateway/);
+        const genesis = await Token.fromCBOR(genesisBytes);
+        await appendRevision(client, aggregator.rootTrustBase, genesis, TEST_DIGEST, bob, null, {
+          timeoutMs: 2_000,
+        });
+
+        const sink = testContext();
+        const attempt = stampRevisionWith(append({ digest: TEST_DIGEST, quiet: true }), client, sink.context);
+        await expect(attempt).rejects.toThrow(/that run's digest and next producer/);
+        expect(sink.stderr()).not.toContain(UNRESOLVED);
+        expect(await journalFiles()).toEqual([]);
+        expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+      });
     });
 
     it('drops a journal whose revision the token file already holds', async () => {

@@ -60,9 +60,12 @@ export interface IDurableWriteOptions {
   readonly followSymlinks: boolean;
   /**
    * `create`: refuse with EEXIST if anything is at the path, even a symlink to a
-   * missing file, unless `followSymlinks`. `replace`: replace whatever is there.
+   * missing file, unless `followSymlinks`. `createInPlace`: the same, but written
+   * directly under its name with no temporary: a crash during the write can leave
+   * a partial file there, but never a second copy anywhere else. `replace`:
+   * replace whatever is there.
    */
-  readonly publish: 'create' | 'replace';
+  readonly publish: 'create' | 'createInPlace' | 'replace';
 }
 
 /** Codes from `link` on a filesystem without hard links. */
@@ -118,7 +121,9 @@ async function resolveSymlinks(fs: IDurableFileSystem, file: string): Promise<st
  *
  * Where the filesystem has no hard links, `create` falls back to an exclusive
  * create of the name itself, and removes it again if the write fails. Only a
- * crash during that write can then leave a partial file.
+ * crash during that write can then leave a partial file. `createInPlace` always
+ * works that way, for data of which a stray second copy would be worse than a
+ * partial file.
  *
  * @param {string} file Absolute path.
  * @param {Uint8Array} data Contents.
@@ -134,6 +139,11 @@ export async function writeFileDurably(
 ): Promise<void> {
   const target = options.followSymlinks ? await resolveSymlinks(fs, file) : file;
   const directory = path.dirname(target);
+  if (options.publish === 'createInPlace') {
+    await createInPlace(fs, target, data, options.fileMode);
+    await fs.syncDirectory(directory).catch(() => undefined);
+    return;
+  }
   let mode = options.fileMode;
   if (mode === undefined && options.publish === 'replace') {
     mode = await fs.stat(target).then(
@@ -178,6 +188,24 @@ async function publishNew(
       throw error;
     }
   }
+  await createInPlace(fs, target, data, mode);
+}
+
+/**
+ * An exclusive create of the name itself, written, fsynced and set to `mode`;
+ * removed again if anything after the create fails.
+ *
+ * @param {IDurableFileSystem} fs File operations.
+ * @param {string} target Path to create.
+ * @param {Uint8Array} data Contents.
+ * @param {number|undefined} mode Exact mode, or undefined for the default less the umask.
+ */
+async function createInPlace(
+  fs: IDurableFileSystem,
+  target: string,
+  data: Uint8Array,
+  mode: number | undefined,
+): Promise<void> {
   try {
     await fs.writeNew(target, data, mode === undefined ? 0o666 : 0o600);
     if (mode !== undefined) {

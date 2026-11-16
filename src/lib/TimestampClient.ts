@@ -96,7 +96,10 @@ export async function findCertifiedProof(
     return null;
   }
   const certified = proof;
-  const verify = async (transactionHash: DataHash): Promise<InclusionProofVerificationStatus> =>
+  const verify = async (
+    transactionHash: DataHash,
+    expiresAt: bigint | null,
+  ): Promise<InclusionProofVerificationStatus> =>
     (
       await InclusionProofVerificationRule.verify(
         context.trustBase,
@@ -104,19 +107,22 @@ export async function findCertifiedProof(
         context.unicityCertificateVerifier,
         certified,
         transactionHash,
-        transaction.expiresAt,
+        expiresAt,
         transaction.lockScript,
         transaction.sourceStateHash,
       )
     ).status;
 
-  const status = await verify(await transaction.calculateTransactionHash());
+  const status = await verify(await transaction.calculateTransactionHash(), transaction.expiresAt);
   if (status === InclusionProofVerificationStatus.OK) {
     return certified;
   }
+  // The other transaction is checked against its own hash and its own deadline: the
+  // same source state and lock script, but not necessarily the same expiry.
   if (
     status === InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH &&
-    (await verify(certified.certificationData.transactionHash)) === InclusionProofVerificationStatus.OK
+    (await verify(certified.certificationData.transactionHash, certified.certificationData.expiresAt)) ===
+      InclusionProofVerificationStatus.OK
   ) {
     throw new StateAlreadyCertifiedError(certified);
   }
@@ -128,7 +134,9 @@ export async function findCertifiedProof(
  *
  * `STATE_ID_EXISTS` means the aggregator already holds a request for this state.
  * If it is this transaction, a repeated run, the proof it holds is returned; if
- * it is another, {@link StateAlreadyCertifiedError} says so. Any other status the
+ * it is another, {@link StateAlreadyCertifiedError} says so. The same error comes
+ * from a proof of another transaction that arrives after `SUCCESS`, which is how
+ * aggregator-go answers a repeat while the first request is still in its round. Any other status the
  * SDK does not list is a warning rather than a failure, and the proof that then
  * arrives is checked against this transaction's hash anyway.
  *
@@ -186,9 +194,11 @@ export async function certifyTransaction(
     }
     return proof;
   } catch (error) {
-    // The earlier request was still waiting for its round. The SDK reports a proof
-    // of another transaction only as a plain Error, so look again to say what it is.
-    if (exists && !(error instanceof SleepError)) {
+    // The SDK reports a proof of another transaction only as a plain Error, so look
+    // again to say what it is. Not only after STATE_ID_EXISTS: aggregator-go answers
+    // SUCCESS to a repeat while the first request for the state waits for its round,
+    // then certifies the first and drops the repeat. A timeout found no proof at all.
+    if (!(error instanceof SleepError)) {
       await findCertifiedProof(client, context, transaction, options.signal);
     }
     throw error;

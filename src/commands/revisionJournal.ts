@@ -1,4 +1,5 @@
-import { open, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { open, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
@@ -37,12 +38,45 @@ interface IJournalJson {
   readonly version: typeof JOURNAL_VERSION;
 }
 
+const JOURNAL_SUFFIX = '.pending';
+
 /**
+ * One journal per transaction, so that two candidates for the same revision, from
+ * runs with different inputs, can be kept side by side until one is certified.
+ *
  * @param {string} tokenFile Absolute token file path.
- * @returns {string} The journal next to it: `.<name>.pending` in the same directory.
+ * @param {Uint8Array} transaction The journaled transfer, CBOR-encoded.
+ * @returns {string} Its journal next to the token file: `.<name>.<first 16 hex of SHA-256(transfer)>.pending`.
  */
-export function journalPath(tokenFile: string): string {
-  return path.join(path.dirname(tokenFile), `.${path.basename(tokenFile)}.pending`);
+export function journalPath(tokenFile: string, transaction: Uint8Array): string {
+  const tag = createHash('sha256').update(transaction).digest('hex').slice(0, 16);
+  return path.join(path.dirname(tokenFile), `.${path.basename(tokenFile)}.${tag}${JOURNAL_SUFFIX}`);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Every journal next to the token file, in name order.
+ *
+ * @param {string} tokenFile Absolute token file path.
+ * @returns {Promise<string[]>} Journal paths.
+ * @throws {CliError} If the directory cannot be listed.
+ */
+export async function findJournals(tokenFile: string): Promise<string[]> {
+  const directory = path.dirname(tokenFile);
+  const pattern = new RegExp(`^\\.${escapeRegExp(path.basename(tokenFile))}\\.[0-9a-f]{16}\\.pending$`);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    throw usageError(`Cannot list ${directory} to look for journals of ${tokenFile}.`, { cause: error });
+  }
+  return names
+    .filter((name) => pattern.test(name))
+    .sort()
+    .map((name) => path.join(directory, name));
 }
 
 /**
@@ -77,16 +111,33 @@ export function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === code;
 }
 
+function samePending(a: IPendingRevision, b: IPendingRevision): boolean {
+  return (
+    a.revision === b.revision &&
+    areUint8ArraysEqual(a.digest, b.digest) &&
+    areUint8ArraysEqual(a.tokenId, b.tokenId) &&
+    areUint8ArraysEqual(a.transaction, b.transaction) &&
+    (a.nextProducer === null
+      ? b.nextProducer === null
+      : b.nextProducer !== null && areUint8ArraysEqual(a.nextProducer, b.nextProducer))
+  );
+}
+
 /**
  * Write the journal durably, before the revision is submitted: an exclusive
  * create, then an fsync of the file and, where the platform allows, of its
  * directory, so a crash cannot leave the name pointing at nothing.
  *
+ * A journal that is already there, for the same transfer, is another run's record
+ * of the very request this run is about to make, and is used as it is. Anything
+ * this call did not create is never removed.
+ *
  * @param {string} file Journal path.
  * @param {IPendingRevision} pending What to record.
- * @throws {CliError} If the journal cannot be written; nothing has been submitted then.
+ * @returns {Promise<boolean>} True if this call created the journal; false if it was already there.
+ * @throws {CliError} If the journal cannot be written, or holds something else; nothing has been submitted then.
  */
-export async function writeJournal(file: string, pending: IPendingRevision): Promise<void> {
+export async function writeJournal(file: string, pending: IPendingRevision): Promise<boolean> {
   const json: IJournalJson = {
     digest: HexConverter.encode(pending.digest),
     format: JOURNAL_FORMAT,
@@ -96,8 +147,24 @@ export async function writeJournal(file: string, pending: IPendingRevision): Pro
     transaction: HexConverter.encode(pending.transaction),
     version: JOURNAL_VERSION,
   };
+  let handle;
   try {
-    const handle = await open(file, 'wx');
+    handle = await open(file, 'wx');
+  } catch (error) {
+    if (hasErrorCode(error, 'EEXIST')) {
+      const existing = await readJournal(file);
+      if (existing !== null && samePending(existing, pending)) {
+        return false;
+      }
+      throw usageError(
+        `The journal ${file} already exists with other content; nothing was submitted. ` +
+          'Move it away if it is not needed.',
+        { cause: error },
+      );
+    }
+    throw usageError(`Cannot write the journal ${file}; nothing was submitted.`, { cause: error });
+  }
+  try {
     try {
       await handle.writeFile(`${JSON.stringify(json, null, 2)}\n`);
       await handle.sync();
@@ -105,6 +172,7 @@ export async function writeJournal(file: string, pending: IPendingRevision): Pro
       await handle.close();
     }
   } catch (error) {
+    // This call created the file, so it is this call's to remove.
     await rm(file, { force: true }).catch(() => undefined);
     throw usageError(`Cannot write the journal ${file}; nothing was submitted.`, { cause: error });
   }
@@ -118,6 +186,7 @@ export async function writeJournal(file: string, pending: IPendingRevision): Pro
   } catch {
     // Not every platform can open or sync a directory; the file itself is synced.
   }
+  return true;
 }
 
 /**

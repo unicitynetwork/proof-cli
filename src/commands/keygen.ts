@@ -18,20 +18,22 @@ const DEFAULT_KEY_FILE = 'unicity-proof.key';
 /**
  * Write a private key file at exactly mode 0600, with {@link writeFileDurably}.
  *
- * The key goes to a fresh inode that is 0600 from creation and is moved into
- * place, never written into an existing file: overwriting in place would fill an
- * inode that keeps whatever permissions it already had for the duration of the
- * write, and narrowing it afterwards is too late, because a reader that opened it
- * beforehand keeps its descriptor. The explicit mode is also what corrects a
- * umask that covers owner bits, which would otherwise leave 0200 or 0000 while
- * the summary reports 0600; it cannot widen the file on the way, since a umask
- * only removes bits. A symlink at the path is replaced or refused, never written
- * through: a key is not written to wherever a link happens to point.
+ * A fresh file is created directly under its name, at 0600 from creation, and
+ * fsynced. Staging it in a temporary file would let a crash leave a hidden second
+ * copy of the key next to `--out`, easy to miss when the key is later moved or
+ * deleted; a partial key at `--out` instead fails loudly when it is used.
  *
- * Staging is the opposite choice from `writeCertifiedToken`, deliberately: there,
- * it bought nothing and added ways to fail after a stamp had been billed, whereas
- * here it is the only way to never expose the key, and a failed `keygen` costs
- * nothing to repeat.
+ * Replacing an existing file is staged: the key goes to a fresh 0600 inode that is
+ * moved into place, never written into the old one, which keeps whatever
+ * permissions it already had for the duration of the write; narrowing it
+ * afterwards is too late, because a reader that opened it beforehand keeps its
+ * descriptor.
+ *
+ * Either way the explicit mode also corrects a umask that covers owner bits, which
+ * would otherwise leave 0200 or 0000 while the summary reports 0600; it cannot
+ * widen the file on the way, since a umask only removes bits. A symlink at the
+ * path is replaced or refused, never written through: a key is not written to
+ * wherever a link happens to point.
  *
  * @param {string} out Absolute destination path.
  * @param {string} contents Key file contents.
@@ -41,7 +43,7 @@ async function writeKeyFile(out: string, contents: string, replace: boolean): Pr
   await writeFileDurably(out, new TextEncoder().encode(contents), {
     fileMode: 0o600,
     followSymlinks: false,
-    publish: replace ? 'replace' : 'create',
+    publish: replace ? 'replace' : 'createInPlace',
   });
 }
 

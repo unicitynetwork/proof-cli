@@ -65,7 +65,9 @@ without it the proof is gone.
   Do not re-stamp.
 - **An interrupted `stamp-revision` append is recoverable; do not improvise.**
   Run `stamp-revision` again on the same token file: it recovers the revision
-  from the `.<name>.pending` journal next to the token file. Never delete that
+  from the `.<name>.<tag>.pending` journals next to the token file. There can be
+  more than one: a revision an earlier run submitted keeps its journal until its
+  outcome is known, and stderr lists it as `not certified yet`. Never delete a
   journal by hand; until the token file holds the revision, it is the only
   record of what was certified. Exit 1 with `already certified with different
   content` means an earlier run certified something else for this revision:

@@ -9,10 +9,13 @@ import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
+import { SignaturePredicateUnlockScript } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicateUnlockScript.js';
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
+import { StateMask } from '@unicitylabs/state-transition-sdk/lib/transaction/StateMask.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
 import { StateAlreadyCertifiedError } from '../../../src/lib/errors.js';
@@ -325,6 +328,29 @@ describe('LineageClient', () => {
     await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
     await expect(
       appendRevision(client, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), fast),
+    ).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+  });
+
+  // Another client with the producer's key can set its own deadline. The conflict
+  // must be checked against that deadline, not this transfer's, or it looks
+  // uncertified and the run ends in the SDK's plain hash-mismatch error.
+  it('recognises a conflicting transfer that carries its own deadline', async () => {
+    const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+    const expiresAt = BigInt(Math.floor(Date.now() / 1000)) + 600n;
+    const conflicting = await TransferTransaction.create(
+      genesis,
+      BurnPredicate.create(new Uint8Array(32)),
+      StateMask.generate(),
+      { data: new Uint8Array([1]), expiresAt },
+    );
+    const certificationData = await CertificationData.fromTransaction(
+      conflicting,
+      await SignaturePredicateUnlockScript.create(conflicting, new SigningService(bob)),
+    );
+    expect(certificationData.expiresAt).toBe(expiresAt);
+    expect((await aggregator.submitCertificationRequest(certificationData)).status).toEqual('SUCCESS');
+    await expect(
+      appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast),
     ).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
   });
 

@@ -487,9 +487,11 @@ export interface IPendingRevisionNote {
 /**
  * Why a pending revision is being printed: `submitting` before it goes to the
  * aggregator; `rejected` when its slot turned out to be taken; `recovered` when it
- * was certified by an earlier run and has just been written to the token file.
+ * was certified by an earlier run and has just been written to the token file;
+ * `unresolved` when an earlier run submitted it and it is not certified yet, but
+ * may still be.
  */
-export type PendingRevisionContext = 'recovered' | 'rejected' | 'submitting';
+export type PendingRevisionContext = 'recovered' | 'rejected' | 'submitting' | 'unresolved';
 
 /**
  * The contents of a revision journal, for stderr: enough to recover the revision
@@ -504,6 +506,7 @@ export function pendingRevisionLines(note: IPendingRevisionNote, context: Pendin
     recovered: `Recovered revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}, certified by an interrupted run:`,
     rejected: `Revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}, as this run submitted it (not certified):`,
     submitting: `Submitting revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}:`,
+    unresolved: `Revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}, submitted by an earlier run and not certified yet:`,
   }[context];
   const lines = [
     heading,
@@ -515,6 +518,11 @@ export function pendingRevisionLines(note: IPendingRevisionNote, context: Pendin
       `  ${line('Journal', note.journalFile)}`,
       'If this run is interrupted, run stamp-revision on the same token file again to recover the revision;',
       'without the journal, run it with this digest and next producer.',
+    );
+  } else if (context === 'unresolved') {
+    lines.push(
+      `  ${line('Journal', note.journalFile)}`,
+      'It may still be certified, so its journal is kept until a revision in its place is; do not delete it.',
     );
   }
   return `${lines.join('\n')}\n`;

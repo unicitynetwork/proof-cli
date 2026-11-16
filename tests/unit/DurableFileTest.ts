@@ -105,6 +105,49 @@ describe('writeFileDurably', () => {
     });
   });
 
+  describe('createInPlace', () => {
+    const inPlace = { fileMode: 0o600, followSymlinks: false, publish: 'createInPlace' } as const;
+
+    it('writes under the name itself, with no temporary that a crash could leave behind', async () => {
+      const created: string[] = [];
+      const recording: IDurableFileSystem = {
+        ...NODE_FILE_SYSTEM,
+        link: noLink,
+        writeNew: (name, data, mode) => {
+          created.push(name);
+          return NODE_FILE_SYSTEM.writeNew(name, data, mode);
+        },
+      };
+      await writeFileDurably(file, DATA, inPlace, recording);
+      expect(created).toEqual([file]);
+      expect(new Uint8Array(await readFile(file))).toEqual(DATA);
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    });
+
+    it('refuses an existing file or symlink, and removes a partial file it created', async () => {
+      await writeFile(file, 'someone else');
+      await expect(writeFileDurably(file, DATA, inPlace)).rejects.toMatchObject({ code: 'EEXIST', path: file });
+      expect(await readFile(file, 'utf8')).toEqual('someone else');
+
+      const link = path.join(directory, 'link');
+      await symlink(path.join(directory, 'missing'), link);
+      await expect(writeFileDurably(link, DATA, inPlace)).rejects.toMatchObject({ code: 'EEXIST', path: link });
+
+      const other = path.join(directory, 'other.key');
+      await expect(
+        writeFileDurably(
+          other,
+          DATA,
+          inPlace,
+          failingWrite(() => true),
+        ),
+      ).rejects.toMatchObject({
+        code: 'ENOSPC',
+      });
+      expect((await readdir(directory)).sort()).toEqual(['doc.lineage', 'link']);
+    });
+  });
+
   describe('replace', () => {
     const replace = { followSymlinks: true, publish: 'replace' } as const;
 

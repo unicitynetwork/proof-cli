@@ -13,6 +13,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 import { ICommandContext } from './context.js';
 import { IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from './durableFile.js';
 import {
+  findJournals,
   hasErrorCode,
   IPendingRevision,
   journalPath,
@@ -178,18 +179,36 @@ interface IAppendOutcome {
   readonly token: Token;
 }
 
+/** A journal for the token file's next revision, read and decoded. */
+interface IJournalEntry {
+  readonly file: string;
+  readonly pending: IPendingRevision;
+  readonly transaction: TransferTransaction;
+}
+
 /**
  * Append the requested revision, journaling it first, so that a run interrupted
  * after certification can be recovered by the next one.
  *
- * - A journal left by an earlier run is dealt with first. If its revision was
- *   certified, it is written to the token file; if it was not, the journal is
- *   dropped, but kept in memory in case it is certified while this run is going.
+ * Journals are per transfer, and one is removed only once its outcome is known:
+ * when the token file holds its revision, or when the slot it would fill is shown,
+ * by a proof that verifies, to hold another transfer. "Not certified yet" is not an
+ * outcome: aggregator-go can still certify a request that was waiting for its round.
+ *
+ * - Journals left by earlier runs are dealt with first. Those whose revision the
+ *   token file holds are removed. Each one for the next revision is looked up; one
+ *   that was certified is written to the token file, and every other journal for
+ *   that revision removed. Those whose slot holds another transfer are removed.
+ *   The rest are kept and listed on stderr whatever `--quiet` says.
  * - The requested revision is then journaled, echoed to stderr unless `--quiet`,
- *   submitted, written to the token file, and the journal removed.
- * - If its slot turns out to be taken (`ALREADY_CERTIFIED`), the journal is
- *   removed, since it was never certified, and the revision is echoed whatever
- *   `--quiet` says, so the user can see what this run tried.
+ *   and submitted. Once it is certified, the token file is written and every
+ *   journal for the revision removed: none of the others can be certified now.
+ * - If its slot turns out to be taken (`ALREADY_CERTIFIED`), its journal is
+ *   removed and the revision echoed whatever `--quiet` says, so the user can see
+ *   what this run tried; then the kept journals are looked up again, since one of
+ *   them may be what took the slot.
+ * - On a refusal, only a journal this run created is removed; on a timeout or any
+ *   other failure, every journal stays.
  *
  * @param {IStampRevisionConfig} config Resolved configuration.
  * @param {StateTransitionClient} client Aggregator client.
@@ -206,52 +225,88 @@ async function appendJournaled(
   token: Token,
 ): Promise<IAppendOutcome> {
   const trustBase = config.network.trustBase;
-  const journalFile = journalPath(config.tokenFile);
-  // Before the journal is acted on, in either direction.
+  // Before any journal is acted on, in either direction.
   await assertValidLineage(token, trustBase);
 
-  // A recovered revision is written and its journal removed, and then either it was
-  // the revision asked for, or the request cannot go ahead.
-  const settle = async (
-    pending: IPendingRevision,
-    recovered: Token,
-    transaction: TransferTransaction,
-  ): Promise<IAppendOutcome> => {
-    await writeRevisionToken(config.tokenFile, recovered.toCBOR(), false, context);
-    await removeJournal(journalFile);
-    if (await isSameRevision(transaction, pending.revision, config.digest, config.recipientKey)) {
-      context.stderr.write(recoveredRevisionLine(pending.revision, journalFile));
-      return { recovered: true, signer: currentProducerKey(token) as Uint8Array, token: recovered };
+  // Every journal still kept for the next revision, this run's own included once written.
+  const kept = new Map<string, IJournalEntry>();
+  const removeKept = async (): Promise<void> => {
+    for (const file of kept.keys()) {
+      await removeJournal(file);
     }
-    writePending(context, pending, journalFile, 'recovered');
-    throw recoveredOtherRevision(pending.revision, recovered, config.tokenFile);
+    kept.clear();
   };
 
-  let unconfirmed: { pending: IPendingRevision; transaction: TransferTransaction } | null = null;
-  const earlier = await readJournal(journalFile);
-  if (earlier !== null) {
-    const standing = await journalStanding(journalFile, earlier, token, config.tokenFile);
-    if (standing.kind === 'next') {
-      let recovered: Token | null = null;
+  // A recovered revision fills the slot, so it is written and every journal for its
+  // revision removed; then either it was the revision asked for, or the request
+  // cannot go ahead.
+  const settle = async (entry: IJournalEntry, recovered: Token): Promise<IAppendOutcome> => {
+    await writeRevisionToken(config.tokenFile, recovered.toCBOR(), false, context);
+    await removeJournal(entry.file);
+    await removeKept();
+    if (await isSameRevision(entry.transaction, entry.pending.revision, config.digest, config.recipientKey)) {
+      context.stderr.write(recoveredRevisionLine(entry.pending.revision, entry.file));
+      return { recovered: true, signer: currentProducerKey(token) as Uint8Array, token: recovered };
+    }
+    writePending(context, entry.pending, entry.file, 'recovered');
+    throw recoveredOtherRevision(entry.pending.revision, recovered, config.tokenFile);
+  };
+
+  // Look up each kept journal: settle the one that was certified, and drop those
+  // whose slot is shown to hold another transfer. With `tolerant`, a failed lookup
+  // keeps the journal instead of failing the run.
+  const recoverKept = async (tolerant: boolean): Promise<IAppendOutcome | null> => {
+    for (const entry of [...kept.values()]) {
+      let recovered: Token | null;
       try {
-        recovered = await recoverRevision(client, trustBase, token, standing.transaction, options);
+        recovered = await recoverRevision(client, trustBase, token, entry.transaction, options);
       } catch (error) {
-        // Its slot holds another transfer: the journaled one was never certified.
-        if (!(error instanceof LineageError && error.code === 'ALREADY_CERTIFIED')) {
-          throw error;
+        if (error instanceof LineageError && error.code === 'ALREADY_CERTIFIED') {
+          // Its slot holds another transfer, shown by a proof that verifies: it never will be certified.
+          kept.delete(entry.file);
+          await removeJournal(entry.file);
+          continue;
         }
+        if (tolerant) {
+          continue;
+        }
+        throw error;
       }
       if (recovered !== null) {
-        return settle(earlier, recovered, standing.transaction);
+        kept.delete(entry.file);
+        return settle(entry, recovered);
       }
-      unconfirmed = { pending: earlier, transaction: standing.transaction };
     }
-    await removeJournal(journalFile);
+    return null;
+  };
+
+  for (const file of await findJournals(config.tokenFile)) {
+    const pending = await readJournal(file);
+    if (pending === null) {
+      continue;
+    }
+    const standing = await journalStanding(file, pending, token, config.tokenFile);
+    if (standing.kind === 'written') {
+      await removeJournal(file);
+    } else {
+      kept.set(file, { file, pending, transaction: standing.transaction });
+    }
+  }
+  const earlier = await recoverKept(false);
+  if (earlier !== null) {
+    return earlier;
   }
 
   const prepared = await prepareRevision(token, trustBase, config.digest, config.privateKey, config.recipientKey);
   const pending = pendingRevision(token, prepared, config.digest, config.recipientKey);
-  await writeJournal(journalFile, pending);
+  const journalFile = journalPath(config.tokenFile, pending.transaction);
+  // An earlier run's journal for this very transfer is this run's journal too.
+  kept.delete(journalFile);
+  for (const entry of kept.values()) {
+    // Not subject to --quiet: this is the only notice that an earlier run's revision is still open.
+    writePending(context, entry.pending, entry.file, 'unresolved');
+  }
+  const created = await writeJournal(journalFile, pending);
   if (!config.quiet) {
     writePending(context, pending, journalFile, 'submitting');
   }
@@ -267,19 +322,18 @@ async function appendJournaled(
     });
   } catch (error) {
     if (error instanceof StampError) {
-      // Refused outright: nothing was certified.
-      await removeJournal(journalFile);
+      // Refused outright: this request certified nothing. A journal an earlier run
+      // wrote for the same transfer stays, since that run's request was a separate one.
+      if (created) {
+        await removeJournal(journalFile);
+      }
     } else if (error instanceof LineageError && error.code === 'ALREADY_CERTIFIED') {
       await removeJournal(journalFile);
       writePending(context, pending, journalFile, 'rejected');
-      if (unconfirmed !== null) {
-        // The earlier run's revision was still waiting for its round when this run looked.
-        const recovered = await recoverRevision(client, trustBase, token, unconfirmed.transaction, options).catch(
-          () => null,
-        );
-        if (recovered !== null) {
-          return settle(unconfirmed.pending, recovered, unconfirmed.transaction);
-        }
+      // Another transfer holds the slot; it may be one an earlier run journaled.
+      const recovered = await recoverKept(true);
+      if (recovered !== null) {
+        return recovered;
       }
     }
     throw error;
@@ -287,6 +341,7 @@ async function appendJournaled(
 
   await writeRevisionToken(config.tokenFile, appended.toCBOR(), false, context);
   await removeJournal(journalFile);
+  await removeKept();
   return { recovered: replayed, signer: new SigningService(config.privateKey).publicKey, token: appended };
 }
 
