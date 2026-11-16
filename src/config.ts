@@ -455,6 +455,7 @@ export interface IStampRevisionFlags extends INetworkFlags {
   readonly apiKey?: string;
   readonly file?: string;
   readonly finalize?: boolean;
+  readonly force?: boolean;
   readonly keyFile?: string;
   readonly quiet?: boolean;
   readonly recipientKey?: string;
@@ -467,6 +468,12 @@ export interface IStampRevisionConfig {
   readonly allowInsecure: boolean;
   readonly apiKey: string;
   readonly digest: Uint8Array;
+  /**
+   * When creating a new lineage, overwrite a file that appeared at the token file
+   * path meanwhile, or write through a symlink to a missing file. Never set with
+   * an existing token file.
+   */
+  readonly force: boolean;
   readonly network: ITimestampNetwork;
   /** Signs the new revision: the genesis reason for a new lineage, the transfer otherwise. */
   readonly privateKey: Uint8Array;
@@ -622,6 +629,13 @@ export async function resolveStampRevisionConfig(
 
   const tokenFile = path.resolve(flags.tokenFile);
   const exists = await assertTokenFileUsable(tokenFile);
+  const force = flags.force ?? false;
+  if (exists && force) {
+    throw usageError(
+      `${tokenFile} exists, so this run would append to it. --force only applies when creating a new lineage, ` +
+        'and never replaces an existing token file.',
+    );
+  }
   let tokenBytes: Uint8Array | null = null;
   if (exists) {
     try {
@@ -638,6 +652,7 @@ export async function resolveStampRevisionConfig(
     allowInsecure,
     apiKey,
     digest,
+    force,
     network,
     privateKey,
     quiet,

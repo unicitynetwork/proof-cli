@@ -407,6 +407,17 @@ describe('resolveStampRevisionConfig', () => {
     expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), quiet: true }, env)).quiet).toBe(true);
   });
 
+  it('accepts --force for a new lineage, and refuses it for an existing token file', async () => {
+    expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), env)).force).toBe(false);
+    expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), force: true }, env)).force).toBe(true);
+    const tokenFile = path.join(directory, 'doc.lineage');
+    await writeFile(tokenFile, 'abcd');
+    await expect(resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), force: true }, env)).rejects.toThrow(
+      `${tokenFile} exists, so this run would append to it. --force only applies when creating a new lineage, ` +
+        'and never replaces an existing token file.',
+    );
+  });
+
   it('records the trust base file, as an absolute path, for messages', async () => {
     expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), env)).trustBasePath).toBeNull();
     const trustBaseFile = path.join(directory, 'testnet2.json');

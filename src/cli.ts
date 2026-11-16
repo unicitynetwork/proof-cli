@@ -92,6 +92,10 @@ program
   .option('--recipient-key-file <path>', "file holding the next producer's public key; alternative to --recipient-key")
   .option('--finalize', 'make this the final revision: seal it and burn the token, so no revision can follow')
   .option('--quiet', 'do not echo the pending revision to stderr once its journal file is written')
+  .option(
+    '--force',
+    'for a new lineage, overwrite a file that appears at --token-file meanwhile, or write through a dangling symlink',
+  )
   .option('--network <name>', 'mainnet or testnet2; or UNICITY_NETWORK (default mainnet)')
   .option('--gateway <url>', 'override the gateway URL; or UNICITY_GATEWAY_URL')
   .option('--api-key <key>', 'gateway API key; or UNICITY_API_KEY')

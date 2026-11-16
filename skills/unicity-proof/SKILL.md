@@ -76,6 +76,11 @@ without it the proof is gone.
   If `stamp-revision` exits 1 saying `the lineage has moved on`, later
   revisions exist: get the current token file from whoever holds the lineage
   rather than creating it again.
+- **A new lineage blocked by a file at `--token-file` is not lost.** Exit 2
+  saying the file appeared during certification, or is a dangling symlink, means
+  the genesis is certified: run the same command with another `--token-file` to
+  recover it. `--force` only overwrites for a new lineage; never use it to
+  "replace" an existing token file (it refuses).
 - **Every `stamp-revision` append needs the lineage's network.** The network is
   not read from the token file, so a testnet2 lineage needs `--network testnet2`
   each time. Exit 2 naming two networks means the configuration, not the token,

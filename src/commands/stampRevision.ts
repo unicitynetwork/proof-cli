@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
@@ -14,6 +14,7 @@ import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConv
 
 import { ICommandContext } from './context.js';
 import {
+  hasErrorCode,
   IPendingRevision,
   journalPath,
   journalStanding,
@@ -55,25 +56,58 @@ import {
 } from '../output.js';
 
 /**
+ * Explain an exclusive create of a new lineage's token file that found something
+ * in the way: a file that appeared since the checks, or a symlink to a missing
+ * file (which looked absent to them). The genesis is certified either way, and the
+ * same command recovers it, so say where it can be run again.
+ *
+ * @param {string} tokenFile Absolute token file path.
+ * @param {unknown} cause The EEXIST.
+ * @returns {Promise<Error>} A usage error.
+ */
+async function tokenFileInTheWay(tokenFile: string, cause: unknown): Promise<Error> {
+  const dangling =
+    (await lstat(tokenFile).then(
+      (stats) => stats.isSymbolicLink(),
+      () => false,
+    )) &&
+    (await stat(tokenFile).then(
+      () => false,
+      () => true,
+    ));
+  const certified = 'The new lineage is certified; running the same command again recovers it';
+  return usageError(
+    dangling
+      ? `${tokenFile} is a symlink to a missing file, so the new lineage was not written. ${certified}: ` +
+          'pass --force to create the file the symlink points to, or use another --token-file.'
+      : `${tokenFile} appeared while the new lineage was being certified, and was not overwritten. ${certified} ` +
+          'with another --token-file.',
+    { cause },
+  );
+}
+
+/**
  * Persist a lineage token whose newest revision has already been certified.
  *
- * A new lineage is written with an exclusive create, so a file that appeared
- * since the checks is never clobbered. An existing lineage is replaced through a
- * temporary file and `rename`, so the previous version stays intact until the new
- * one is complete: truncating it in place and then failing would lose the whole
- * history, not just the new revision. Whatever goes wrong, the full token is
- * printed as hex before the error propagates.
+ * A new lineage is written with an exclusive create, unless `--force`, so a file
+ * that appeared since the checks is never clobbered. An existing lineage is
+ * replaced through a temporary file and `rename`, so the previous version stays
+ * intact until the new one is complete: truncating it in place and then failing
+ * would lose the whole history, not just the new revision. Whatever goes wrong,
+ * the full token is printed as hex before the error propagates.
  *
  * @param {string} tokenFile Absolute token file path.
  * @param {Uint8Array} bytes Encoded token.
  * @param {boolean} created Whether this is a new lineage.
  * @param {ICommandContext} context Streams.
+ * @param {boolean} [force] For a new lineage, overwrite whatever is at the path, or write through a symlink.
  */
 export async function writeRevisionToken(
   tokenFile: string,
   bytes: Uint8Array,
   created: boolean,
   context: ICommandContext,
+  force = false,
 ): Promise<void> {
   const temporary = path.join(
     path.dirname(tokenFile),
@@ -81,7 +115,7 @@ export async function writeRevisionToken(
   );
   try {
     if (created) {
-      await writeFile(tokenFile, bytes, { flag: 'wx' });
+      await writeFile(tokenFile, bytes, { flag: force ? 'w' : 'wx' });
     } else {
       await writeFile(temporary, bytes, { flag: 'wx' });
       await rename(temporary, tokenFile);
@@ -91,6 +125,9 @@ export async function writeRevisionToken(
     context.stderr.write(revisionRecoveryLines(bytes));
     if (!created) {
       await rm(temporary, { force: true }).catch(() => undefined);
+    }
+    if (created && hasErrorCode(error, 'EEXIST')) {
+      throw await tokenFileInTheWay(tokenFile, error);
     }
     throw error;
   }
@@ -387,7 +424,7 @@ export async function stampRevisionWith(
     if (recovered) {
       await assertNotSuperseded(client, trustBase, token, context);
     }
-    await writeRevisionToken(config.tokenFile, token.toCBOR(), true, context);
+    await writeRevisionToken(config.tokenFile, token.toCBOR(), true, context, config.force);
     if (recovered) {
       // Not subject to --quiet: without it, two files can pass for two lineages.
       context.stderr.write(existingLineageNote(token.id.bytes));

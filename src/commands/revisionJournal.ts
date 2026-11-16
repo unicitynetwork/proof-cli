@@ -67,7 +67,12 @@ export function pendingRevision(
   };
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
+/**
+ * @param {unknown} error Thrown value.
+ * @param {string} code Node error code, such as `ENOENT`.
+ * @returns {boolean} Whether the error carries that code.
+ */
+export function hasErrorCode(error: unknown, code: string): boolean {
   // Not `instanceof Error`: errors from Node's fs need not come from this realm's Error.
   return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === code;
 }

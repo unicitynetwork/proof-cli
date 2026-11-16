@@ -1,4 +1,4 @@
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
@@ -95,6 +95,7 @@ describe('stampRevisionWith', () => {
       allowInsecure: false,
       apiKey: 'key',
       digest: TEST_DIGEST,
+      force: false,
       network: { gatewayUrl: 'https://gateway.test', preset: 'testnet2', trustBase: aggregator.rootTrustBase },
       privateKey: TEST_PRIVATE_KEY,
       quiet: false,
@@ -504,6 +505,66 @@ describe('stampRevisionWith', () => {
         expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
       },
     );
+  });
+
+  describe('a token file in the way of a new lineage', () => {
+    /** Runs `blocker` on the token file path while the genesis is being certified. */
+    function blockingClient(blocker: (tokenFile: string) => Promise<void>): StateTransitionClient {
+      const tokenFile = path.join(directory, 'doc.lineage');
+      return new StateTransitionClient({
+        getInclusionProof: async (stateId: StateId): Promise<InclusionProofResponse> => {
+          await blocker(tokenFile);
+          return aggregator.getInclusionProof(stateId);
+        },
+        submitCertificationRequest: (data: CertificationData): Promise<CertificationResponse> =>
+          aggregator.submitCertificationRequest(data),
+      });
+    }
+
+    const appear = async (tokenFile: string): Promise<void> => {
+      await writeFile(tokenFile, 'someone else');
+    };
+
+    it('leaves a file that appeared alone, and says to run again with another --token-file', async () => {
+      const sink = testContext();
+      const attempt = stampRevisionWith(config({}), blockingClient(appear), sink.context);
+      await expect(attempt).rejects.toThrow(
+        /doc\.lineage appeared while the new lineage was being certified, and was not overwritten\. .* with another --token-file\.$/,
+      );
+      expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+      expect(await readFile(path.join(directory, 'doc.lineage'), 'utf8')).toEqual('someone else');
+      expect(sink.stderr()).toContain('the revision was certified');
+
+      const elsewhere = path.join(directory, 'other.lineage');
+      const again = testContext({ json: true });
+      expect(await stampRevisionWith(config({ tokenFile: elsewhere }), client, again.context)).toBe(0);
+      expect(again.json()).toMatchObject({ created: true, recovered: true, revision: '0' });
+    });
+
+    it('overwrites a file that appeared with --force', async () => {
+      const sink = testContext({ json: true });
+      expect(await stampRevisionWith(config({ force: true }), blockingClient(appear), sink.context)).toBe(0);
+      const token = await Token.fromCBOR(new Uint8Array(await readFile(path.join(directory, 'doc.lineage'))));
+      expect((await verifyLineage(token, aggregator.rootTrustBase)).status).toEqual('OK');
+    });
+
+    it('says --force writes through a dangling symlink, and it does', async () => {
+      const tokenFile = path.join(directory, 'doc.lineage');
+      const target = path.join(directory, 'target.lineage');
+      await symlink(target, tokenFile);
+      const attempt = stampRevisionWith(config({}), client, testContext().context);
+      await expect(attempt).rejects.toThrow(
+        /doc\.lineage is a symlink to a missing file, so the new lineage was not written\. .*: pass --force to create the file the symlink points to, or use another --token-file\.$/,
+      );
+      expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+
+      const sink = testContext({ json: true });
+      expect(await stampRevisionWith(config({ force: true }), client, sink.context)).toBe(0);
+      expect(sink.json()).toMatchObject({ created: true, recovered: true });
+      expect((await lstat(tokenFile)).isSymbolicLink()).toBe(true);
+      const token = await Token.fromCBOR(new Uint8Array(await readFile(target)));
+      expect((await verifyLineage(token, aggregator.rootTrustBase)).status).toEqual('OK');
+    });
   });
 
   describe('networkMismatch', () => {

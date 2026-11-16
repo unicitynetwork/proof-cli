@@ -26,9 +26,21 @@ describe('writeRevisionToken', () => {
     const out = path.join(directory, 'doc.lineage');
     await writeFile(out, 'someone else');
     const sink = testContext();
-    await expect(writeRevisionToken(out, TOKEN, true, sink.context)).rejects.toThrow(/EEXIST/);
+    await expect(writeRevisionToken(out, TOKEN, true, sink.context)).rejects.toThrow(
+      /appeared while the new lineage was being certified/,
+    );
     expect(await readFile(out, 'utf8')).toEqual('someone else');
     expect(sink.stderr()).toContain(HexConverter.encode(TOKEN));
+  });
+
+  it('overwrites a file in the way of a new lineage with force', async () => {
+    const directory = await tempDir('proof-cli-revision-');
+    const out = path.join(directory, 'doc.lineage');
+    await writeFile(out, 'someone else');
+    const sink = testContext();
+    await writeRevisionToken(out, TOKEN, true, sink.context, true);
+    expect(new Uint8Array(await readFile(out))).toEqual(TOKEN);
+    expect(sink.stderr()).toEqual('');
   });
 
   it('prints the token when the directory is gone', async () => {
