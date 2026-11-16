@@ -21,6 +21,7 @@ import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verifi
 
 import { createRootTrustBase } from './RootTrustBaseFixture.js';
 import { createUnicityCertificate } from './UnicityCertificateFixture.js';
+import { STATE_ID_EXISTS_STATUS } from '../../src/lib/TimestampClient.js';
 
 /** Lifetime granted to a request without its own deadline, matching the aggregator's default. */
 const REQUEST_TTL = 3600n;
@@ -92,14 +93,17 @@ export class TestAggregatorClient implements IAggregatorClient {
       return CertificationResponse.create(CertificationStatus.REQUEST_EXPIRED);
     }
 
+    // Like aggregator-go: a state id it already holds is answered with STATE_ID_EXISTS,
+    // whether the request is the same transaction again or another one.
     const path = TestAggregatorClient.pathOf(stateId);
-    if (!this.requests.has(path)) {
-      const referenceTime = this.referenceTime;
-      const leafValue = await calculateLeafValue(certificationData.transactionHash, referenceTime);
-      await this.smt.addLeaf(stateId.data, leafValue.data);
-      this.requests.set(path, { certificationData, referenceTime });
-      this.referenceTime += 1n;
+    if (this.requests.has(path)) {
+      return CertificationResponse.create(STATE_ID_EXISTS_STATUS);
     }
+    const referenceTime = this.referenceTime;
+    const leafValue = await calculateLeafValue(certificationData.transactionHash, referenceTime);
+    await this.smt.addLeaf(stateId.data, leafValue.data);
+    this.requests.set(path, { certificationData, referenceTime });
+    this.referenceTime += 1n;
 
     return CertificationResponse.create(CertificationStatus.SUCCESS);
   }

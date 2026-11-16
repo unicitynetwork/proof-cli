@@ -23,6 +23,25 @@ Then read `Expected hash  matches`. Without `--file` or `--hash` that line tells
 you the proof was never tied to anything — a bare `Status OK` on its own
 establishes nothing about the file in front of you.
 
+A document lineage token (from `stamp-revision`, `Token type  document lineage`)
+holds several revisions. With `--file` it passes if **any** revision carries the
+file's hash, so read the `Expected hash` line in full: `matches revision 1;
+superseded by revision 2` means the file is a genuine but outdated revision.
+`matches revision 2 (the final)` means the lineage was finalized with that
+revision (`--finalize`); no later revision can exist. `matches revision 2 (the
+latest in this file)` does **not** mean the file is current: any older copy of
+an unsealed lineage still verifies, and verification is offline, so later
+revisions may have been certified since. Only `(the final)` rules them out; if
+being current matters, ask whoever holds the lineage for the current file.
+
+A matching hash does not say *which* lineage the file is in: one issuer can
+start several certified lineages from the same document. Only the token id
+identifies a lineage, so verify with `--token-id <id>`, using the id the
+issuer gave you through a channel you trust, and read the `Lineage id` line:
+`matches` ties the result to that lineage; `not checked` means the `Issuer`
+and `Expected hash` lines are not enough on their own; `differs` means this
+is another lineage.
+
 Also read the `Trust base` line. A verdict is only as good as the root of trust
 behind it, and `OK` against someone else's trust base means nothing.
 
@@ -44,6 +63,33 @@ without it the proof is gone.
 - **A failed write after certification is recoverable.** The token is printed to
   stderr as hex, and both `verify` and `inspect` accept hex, so save that text.
   Do not re-stamp.
+- **An interrupted `stamp-revision` append is recoverable; do not improvise.**
+  Run `stamp-revision` again on the same token file: it recovers the revision
+  from the `.<name>.<tag>.pending` journals next to the token file. There can be
+  more than one: a revision an earlier run submitted keeps its journal until its
+  outcome is known, and stderr lists it as `not certified yet`. Never delete a
+  journal by hand; until the token file holds the revision, it is the only
+  record of what was certified. Exit 1 with `already certified with different
+  content` means an earlier run certified something else for this revision:
+  only that run's digest and recipient recover it, and they are on stderr from
+  when it was submitted.
+- **`(existing lineage, recovered)` means no new lineage was created.** The
+  same issuer key, document and first producer always give the same lineage.
+  If `stamp-revision` exits 1 saying `the lineage has moved on`, later
+  revisions exist: get the current token file from whoever holds the lineage
+  rather than creating it again.
+- **A new lineage blocked by a file at `--token-file` is not lost.** Exit 2
+  saying the file appeared during certification, or is a dangling symlink, means
+  the genesis is certified: run the same command with another `--token-file` to
+  recover it. `--force` only overwrites for a new lineage; never use it to
+  "replace" an existing token file (it refuses).
+- **Exit 1 saying the token file `is not a token`, with no lineage yet:** an
+  earlier run may have failed writing it. Move the file away (don't delete it)
+  and run the same command again; the lineage is recovered.
+- **Every `stamp-revision` append needs the lineage's network.** The network is
+  not read from the token file, so a testnet2 lineage needs `--network testnet2`
+  each time. Exit 2 naming two networks means the configuration, not the token,
+  is wrong: change the setting it names. Do not re-create the lineage.
 - `--sign` exits 2 unless a key is configured. Use it in any automated path that
   must never silently produce an anonymous stamp. `--anonymous` forces the
   opposite.
@@ -58,8 +104,8 @@ about foresight.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success. For `verify`: valid, and the hash matched if one was given. |
-| `1` | Verification failed, hash mismatch, or the input is not a token. |
+| `0` | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
+| `1` | Verification failed, hash or token id mismatch, or the input is not a token. For `stamp-revision`: the revision was already certified with different content, or a recovered genesis's lineage has moved on. |
 | `2` | Usage or configuration error. |
 | `3` | Network error, aggregator rejection, or timeout. |
 | `130` | Interrupted. |
