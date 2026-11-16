@@ -12,11 +12,12 @@ import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/Sta
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
-import { stampRevisionWith } from '../../src/commands/stampRevision.js';
+import { networkMismatch, stampRevisionWith } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
 import { appendRevision, prepareRevision } from '../../src/lib/LineageClient.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
+import { bundledTrustBase } from '../../src/lib/networks.js';
 import {
   existingLineageNote,
   IRevisionSummary,
@@ -101,6 +102,7 @@ describe('stampRevisionWith', () => {
       timeoutMs: 2_000,
       tokenBytes: null,
       tokenFile: path.join(directory, 'doc.lineage'),
+      trustBasePath: null,
       ...overrides,
     };
   }
@@ -465,6 +467,65 @@ describe('stampRevisionWith', () => {
       );
       await expect(attempt).rejects.toMatchObject({ code: 'INVALID_TOKEN' });
       expect(await readFile(journal)).toEqual(leftover);
+    });
+
+    it.each([
+      [
+        null,
+        /, but this run is set to mainnet \(1\)\. Pass --trust-base with that network's trust base, and --gateway/,
+      ],
+      [
+        '/keys/mainnet.json',
+        /, but the trust base \/keys\/mainnet\.json is for mainnet \(1\)\. Pass --trust-base .* instead\./,
+      ],
+    ])(
+      'refuses, with exit 2, a token from another network than the configured one (trust base file %s)',
+      async (trustBasePath, advice) => {
+        await interrupted();
+        const leftover = await readFile(journal);
+        const mainnet = {
+          network: {
+            gatewayUrl: 'https://gateway.test',
+            preset: 'mainnet' as const,
+            trustBase: bundledTrustBase('mainnet'),
+          },
+          trustBasePath,
+        };
+        const sink = testContext();
+        const attempt = stampRevisionWith(append(mainnet), client, sink.context);
+        await expect(attempt).rejects.toThrow(
+          new RegExp(`^${tokenFile} is a lineage on network 3, which has no bundled trust base`),
+        );
+        await expect(attempt).rejects.toThrow(advice);
+        await expect(attempt).rejects.toThrow(/ Nothing was submitted\.$/);
+        expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+        expect(sink.stderr()).toEqual('');
+        expect(await readFile(journal)).toEqual(leftover);
+        expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+      },
+    );
+  });
+
+  describe('networkMismatch', () => {
+    it('accepts a token from the configured network', () => {
+      expect(networkMismatch('/d/doc.lineage', 4, 4, null)).toBeNull();
+      expect(networkMismatch('/d/doc.lineage', 3, 3, '/keys/local.json')).toBeNull();
+    });
+
+    it('names both networks and the setting to change', () => {
+      expect(networkMismatch('/d/doc.lineage', 4, 1, null)?.message).toEqual(
+        '/d/doc.lineage is a testnet2 (4) lineage, but this run is set to mainnet (1). ' +
+          'Pass --network testnet2, or set UNICITY_NETWORK=testnet2. Nothing was submitted.',
+      );
+      expect(networkMismatch('/d/doc.lineage', 1, 3, '/keys/local.json')?.message).toEqual(
+        '/d/doc.lineage is a mainnet (1) lineage, but the trust base /keys/local.json is for unknown network (3). ' +
+          'Pass a trust base for mainnet, or drop the trust base (--trust-base or UNICITY_TRUST_BASE) ' +
+          'and pass --network mainnet. Nothing was submitted.',
+      );
+    });
+
+    it('is a usage error', () => {
+      expect(toExitCode(networkMismatch('/d/doc.lineage', 4, 1, null))).toBe(EXIT_USAGE);
     });
   });
 

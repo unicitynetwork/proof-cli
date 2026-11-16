@@ -482,6 +482,11 @@ export interface IStampRevisionConfig {
   readonly tokenBytes: Uint8Array | null;
   /** Absolute path of the token file. */
   readonly tokenFile: string;
+  /**
+   * Absolute path of the trust base file that replaced the bundled one, or null.
+   * Only for messages: an append whose token is from another network says what to change.
+   */
+  readonly trustBasePath: string | null;
 }
 
 /** Compressed secp256k1 public key as hex, any case, optional 0x prefix. */
@@ -628,5 +633,18 @@ export async function resolveStampRevisionConfig(
 
   const digest = (await resolveDigest(digestArgument, flags.file)) as Uint8Array;
   const quiet = flags.quiet ?? false;
-  return { allowInsecure, apiKey, digest, network, privateKey, quiet, recipientKey, timeoutMs, tokenBytes, tokenFile };
+  const trustBasePath = selection.trustBasePath === undefined ? null : path.resolve(selection.trustBasePath);
+  return {
+    allowInsecure,
+    apiKey,
+    digest,
+    network,
+    privateKey,
+    quiet,
+    recipientKey,
+    timeoutMs,
+    tokenBytes,
+    tokenFile,
+    trustBasePath,
+  };
 }

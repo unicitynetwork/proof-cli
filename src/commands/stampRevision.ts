@@ -24,7 +24,7 @@ import {
 } from './revisionJournal.js';
 import { decodeToken, tokenBytesFromInput } from './tokenInput.js';
 import { IStampRevisionConfig, IStampRevisionFlags, resolveStampRevisionConfig } from '../config.js';
-import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED } from '../errors.js';
+import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED, usageError } from '../errors.js';
 import { errorMessage, StampError } from '../lib/errors.js';
 import {
   assertValidLineage,
@@ -38,9 +38,11 @@ import {
   recoverRevision,
   SuccessorLookup,
 } from '../lib/LineageClient.js';
+import { networkNameForId } from '../lib/networks.js';
 import { ICertifyOptions } from '../lib/TimestampClient.js';
 import {
   existingLineageNote,
+  networkLabel,
   PendingRevisionContext,
   pendingRevisionLines,
   recoveredRevisionLine,
@@ -302,6 +304,51 @@ function latestCertified(token: Token): CertifiedMintTransaction | CertifiedTran
 }
 
 /**
+ * Say what to change when the token file is from another network than the one
+ * this run is set to. Not inferred from the token: the network also picks the
+ * gateway the API key is sent to, so the user chooses it, as for a genesis.
+ *
+ * @param {string} tokenFile Token file path, for the message.
+ * @param {number} tokenNetworkId Network id the token carries.
+ * @param {number} configuredNetworkId Network id of the configured trust base.
+ * @param {string|null} trustBasePath The configured trust base file, or null for a bundled one.
+ * @returns {Error|null} A usage error, or null when the networks agree.
+ */
+export function networkMismatch(
+  tokenFile: string,
+  tokenNetworkId: number,
+  configuredNetworkId: number,
+  trustBasePath: string | null,
+): Error | null {
+  if (tokenNetworkId === configuredNetworkId) {
+    return null;
+  }
+  const bundled = networkNameForId(tokenNetworkId);
+  const lineage =
+    bundled === undefined
+      ? `${tokenFile} is a lineage on network ${tokenNetworkId}, which has no bundled trust base`
+      : `${tokenFile} is a ${networkLabel(tokenNetworkId)} lineage`;
+  const configured =
+    trustBasePath === null
+      ? `this run is set to ${networkLabel(configuredNetworkId)}`
+      : `the trust base ${trustBasePath} is for ${networkLabel(configuredNetworkId)}`;
+  let advice: string;
+  if (bundled === undefined) {
+    advice =
+      trustBasePath === null
+        ? "Pass --trust-base with that network's trust base, and --gateway with its gateway."
+        : "Pass --trust-base with that network's trust base instead.";
+  } else {
+    advice =
+      trustBasePath === null
+        ? `Pass --network ${bundled}, or set UNICITY_NETWORK=${bundled}.`
+        : `Pass a trust base for ${bundled}, or drop the trust base (--trust-base or UNICITY_TRUST_BASE) ` +
+          `and pass --network ${bundled}.`;
+  }
+  return usageError(`${lineage}, but ${configured}. ${advice} Nothing was submitted.`);
+}
+
+/**
  * The part of `stamp-revision` after configuration: certify, write, report. Takes
  * the client as a parameter so it can run against an in-memory aggregator.
  *
@@ -349,6 +396,16 @@ export async function stampRevisionWith(
     const decoded = await decodeToken(tokenBytesFromInput(config.tokenBytes));
     if (decoded.token === null) {
       throw new CliError(`${config.tokenFile} is ${decoded.error}.`, EXIT_VERIFICATION_FAILED);
+    }
+    // Before the journal is read: a journal is only acted on against the right network.
+    const mismatch = networkMismatch(
+      config.tokenFile,
+      decoded.token.networkId.id,
+      trustBase.networkId.id,
+      config.trustBasePath,
+    );
+    if (mismatch !== null) {
+      throw mismatch;
     }
     ({ recovered, signer, token } = await appendJournaled(config, client, context, options, decoded.token));
   }

@@ -407,6 +407,16 @@ describe('resolveStampRevisionConfig', () => {
     expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), quiet: true }, env)).quiet).toBe(true);
   });
 
+  it('records the trust base file, as an absolute path, for messages', async () => {
+    expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), env)).trustBasePath).toBeNull();
+    const trustBaseFile = path.join(directory, 'testnet2.json');
+    await writeFile(trustBaseFile, JSON.stringify(NETWORKS.testnet2.trustBaseJson));
+    const relative = path.relative(process.cwd(), trustBaseFile);
+    const config = await resolveStampRevisionConfig(TEST_DIGEST_HEX, base(), { ...env, UNICITY_TRUST_BASE: relative });
+    expect(config.trustBasePath).toEqual(trustBaseFile);
+    expect(config.network.trustBase.networkId.id).toBe(4);
+  });
+
   it('reads an existing token file and a recipient key file', async () => {
     const tokenFile = path.join(directory, 'doc.lineage');
     await writeFile(tokenFile, 'abcd');

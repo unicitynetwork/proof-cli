@@ -36,7 +36,7 @@ Arguments are loaded, in order of precedence, from: flags > variables in shell m
 | Variable | Flag | Meaning | Default |
 | --- | --- | --- | --- |
 | `UNICITY_API_KEY` | `--api-key` | Gateway API key. Needed by `stamp` only. | none |
-| `UNICITY_NETWORK` | `--network` | `mainnet` or `testnet2`. Selects the gateway and the bundled trust base for `stamp`. `verify` reads the network from the token; only its `--network` flag overrides that. | `mainnet` |
+| `UNICITY_NETWORK` | `--network` | `mainnet` or `testnet2`. Selects the gateway and the bundled trust base for `stamp` and `stamp-revision`; an append must name the network its token is from. `verify` reads the network from the token; only its `--network` flag overrides that. | `mainnet` |
 | `UNICITY_PRIVATE_KEY` | `--key-file` | secp256k1 private key, 64 hex characters. When set, stamps are signed. | none, stamps are anonymous |
 | `UNICITY_GATEWAY_URL` | `--gateway` | Override the gateway URL only. | preset gateway |
 | `UNICITY_TRUST_BASE` | `--trust-base` | Override the bundled trust base file. **Not** read from an automatically discovered `./.env` — see below. | bundled file |
@@ -143,7 +143,7 @@ unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file 
   - A journal the command cannot place (for another lineage, for a later revision than the token file holds, or unreadable) stops it with exit 2 and is left alone.
   - A new lineage needs no journal: its genesis is derived from its inputs, and running it again with the same file, key, digest and recipient recovers it (see above).
 - In `--json` output, `recovered` is true when an earlier run had already certified the revision and this run only recovered it; the text output marks such a revision `(recovered)`.
-- Network options behave as for `stamp`.
+- Network options behave as for `stamp`, so a testnet2 lineage needs `--network testnet2` (or `UNICITY_NETWORK=testnet2`) on every append, not just at creation. The network is not taken from the token, because it also decides which gateway the API key is sent to. An append whose token file is from another network than the one configured stops with exit 2 before anything is submitted, and the message says what to change.
 
 `verify` and `inspect` recognise lineage tokens by their token type and list every revision with its hash, signer, next producer and certification time:
 
