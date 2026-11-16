@@ -15,18 +15,23 @@ import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/Sta
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
+import { StateAlreadyCertifiedError } from '../../../src/lib/errors.js';
 import {
   appendRevision,
+  certifyRevision,
   createLineage,
   currentProducerKey,
   deriveGenesisSalt,
   isFinalized,
+  isSameRevision,
   LineageError,
+  prepareRevision,
+  recoverRevision,
 } from '../../../src/lib/LineageClient.js';
 import { LINEAGE_TOKEN_TYPE_HEX, LineageRevision } from '../../../src/lib/LineagePayload.js';
-import { verifyLineage } from '../../../src/lib/LineageVerification.js';
+import { createLineageVerificationContext, verifyLineage } from '../../../src/lib/LineageVerification.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
-import { stampWith } from '../../../src/lib/TimestampClient.js';
+import { findCertifiedProof, STATE_ID_EXISTS_STATUS, stampWith } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 
@@ -43,6 +48,32 @@ class CountingClient implements IAggregatorClient {
   public submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
     this.submissions += 1;
     return this.inner.submitCertificationRequest(certificationData);
+  }
+}
+
+/**
+ * An aggregator that already holds an earlier request for the state, not yet in a
+ * round: it answers STATE_ID_EXISTS, and certifies the earlier request only from
+ * the second proof lookup on.
+ */
+class LateRoundClient implements IAggregatorClient {
+  private lookups = 0;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly earlier: CertificationData,
+  ) {}
+
+  public async getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    this.lookups += 1;
+    if (this.lookups === 2) {
+      await this.inner.submitCertificationRequest(this.earlier);
+    }
+    return this.inner.getInclusionProof(stateId);
+  }
+
+  public submitCertificationRequest(): Promise<CertificationResponse> {
+    return Promise.resolve(CertificationResponse.create(STATE_ID_EXISTS_STATUS));
   }
 }
 
@@ -126,9 +157,90 @@ describe('LineageClient', () => {
   it('replays an interrupted step identically, so running it again recovers the revision', async () => {
     const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
     const first = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
-    // Same inputs against the same starting state: the aggregator already holds this request.
-    const again = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
+    // Same inputs against the same starting state: the aggregator answers STATE_ID_EXISTS,
+    // and the proof it holds is this transfer's, so the replay completes without a warning.
+    const warnings: string[] = [];
+    const again = await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), {
+      ...fast,
+      onWarning: (message) => warnings.push(message),
+    });
     expect(HexConverter.encode(again.toCBOR())).toEqual(HexConverter.encode(first.toCBOR()));
+    expect(warnings).toEqual([]);
+  });
+
+  describe('a revision slot that is already certified', () => {
+    it('says so, with ALREADY_CERTIFIED, when another transfer took the slot', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
+      const attempt = appendRevision(client, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), fast);
+      await expect(attempt).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+      await expect(attempt).rejects.toThrow(
+        /^Revision 1 of this lineage was already certified with different content.*that run's digest and next producer/,
+      );
+    });
+
+    it('recovers a transfer the aggregator certified, without a key or a submission', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const prepared = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      expect(await recoverRevision(client, trustBase, genesis, prepared.transaction, fast)).toBeNull();
+
+      const certified = await certifyRevision(client, trustBase, genesis, prepared, fast);
+      const submissions = counting.submissions;
+      const recovered = await recoverRevision(client, trustBase, genesis, prepared.transaction, fast);
+      expect(counting.submissions).toBe(submissions);
+      expect(HexConverter.encode(recovered!.toCBOR())).toEqual(HexConverter.encode(certified.toCBOR()));
+
+      const other = await prepareRevision(genesis, trustBase, THIRD_DIGEST, bob, publicKey(carol));
+      await expect(recoverRevision(client, trustBase, genesis, other.transaction, fast)).rejects.toMatchObject({
+        code: 'ALREADY_CERTIFIED',
+      });
+    });
+
+    it('tells whether a transfer is the revision a digest and next producer make', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const { transaction } = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      expect(await isSameRevision(transaction, 1n, OTHER_DIGEST, publicKey(carol))).toBe(true);
+      expect(await isSameRevision(transaction, 1n, THIRD_DIGEST, publicKey(carol))).toBe(false);
+      expect(await isSameRevision(transaction, 1n, OTHER_DIGEST, publicKey(alice))).toBe(false);
+      expect(await isSameRevision(transaction, 1n, OTHER_DIGEST, null)).toBe(false);
+      expect(await isSameRevision(transaction, 2n, OTHER_DIGEST, publicKey(carol))).toBe(false);
+    });
+
+    it('waits for an earlier request still in its round, and recovers it if it is this one', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const prepared = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      const late = new StateTransitionClient(new LateRoundClient(aggregator, prepared.certificationData));
+      const token = await certifyRevision(late, trustBase, genesis, prepared, fast);
+      expect(token.transactions).toHaveLength(1);
+    });
+
+    it('waits for an earlier request still in its round, and reports it if it is another', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const other = await prepareRevision(genesis, trustBase, THIRD_DIGEST, bob, publicKey(carol));
+      const late = new StateTransitionClient(new LateRoundClient(aggregator, other.certificationData));
+      const prepared = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      await expect(certifyRevision(late, trustBase, genesis, prepared, fast)).rejects.toMatchObject({
+        code: 'ALREADY_CERTIFIED',
+      });
+    });
+
+    // A gateway can claim another transaction took the slot; only a proof that
+    // authenticates under the trust base is believed.
+    it('does not take an unauthenticated proof of another transfer for a taken slot', async () => {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const elsewhere = TestAggregatorClient.create();
+      const other = await prepareRevision(genesis, trustBase, THIRD_DIGEST, bob, publicKey(carol));
+      await elsewhere.submitCertificationRequest(other.certificationData);
+      const forging = new StateTransitionClient(elsewhere);
+      const mine = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      await expect(
+        findCertifiedProof(forging, createLineageVerificationContext(trustBase), mine.transaction),
+      ).resolves.toBeNull();
+      // The same proof under its own trust base is a genuine taken slot.
+      await expect(
+        findCertifiedProof(forging, createLineageVerificationContext(elsewhere.rootTrustBase), mine.transaction),
+      ).rejects.toBeInstanceOf(StateAlreadyCertifiedError);
+    });
   });
 
   it('replays an interrupted genesis identically, so running it again recovers the lineage', async () => {
@@ -177,11 +289,8 @@ describe('LineageClient', () => {
     const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
     await appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast);
     await expect(
-      appendRevision(client, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), {
-        pollIntervalMs: 10,
-        timeoutMs: 300,
-      }),
-    ).rejects.toThrow();
+      appendRevision(client, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), fast),
+    ).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
   });
 
   describe('finalization', () => {

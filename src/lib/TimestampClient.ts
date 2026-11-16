@@ -3,17 +3,24 @@ import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/Roo
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { CertificationStatus } from '@unicitylabs/state-transition-sdk/lib/api/CertificationResponse.js';
 import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
+import { JsonRpcNetworkError } from '@unicitylabs/state-transition-sdk/lib/api/json-rpc/JsonRpcNetworkError.js';
+import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
+import { DataHash } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHash.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
 import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
 import type { ITransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/ITransaction.js';
 import { MintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/MintTransaction.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import {
+  InclusionProofVerificationRule,
+  InclusionProofVerificationStatus,
+} from '@unicitylabs/state-transition-sdk/lib/transaction/verification/rule/InclusionProofVerificationRule.js';
 import { VerificationContext } from '@unicitylabs/state-transition-sdk/lib/transaction/verification/VerificationContext.js';
-import { waitInclusionProof } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
+import { SleepError, waitInclusionProof } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 
 import { TIMESTAMP_RECIPIENT, TIMESTAMP_TOKEN_TYPE } from './constants.js';
-import { StampError } from './errors.js';
+import { StampError, StateAlreadyCertifiedError } from './errors.js';
 import { ITimestampNetwork } from './networks.js';
 import { TimestampPayload } from './TimestampPayload.js';
 import { createVerificationContext } from './verification.js';
@@ -41,13 +48,84 @@ export interface IStampOptions extends ICertifyOptions {
 
 const KNOWN_STATUSES: readonly string[] = Object.values(CertificationStatus);
 const SUCCESS_STATUS: string = CertificationStatus.SUCCESS;
+/**
+ * The aggregator's answer when it already holds a request for the state being
+ * spent. The SDK does not list it; aggregator-go sends it for every repeated
+ * state id, whether the earlier request was this very transaction or another.
+ */
+export const STATE_ID_EXISTS_STATUS = 'STATE_ID_EXISTS';
+
+/**
+ * Look up the inclusion proof the aggregator already holds for the state that
+ * `transaction` spends, and tell whether it certifies this transaction.
+ *
+ * A proof for another transaction is reported only once it authenticates against
+ * the trust base under that other transaction's hash; the hash comparison alone
+ * comes before any authentication, and a gateway could fake it.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {VerificationContext} context Verification context for the network behind the client.
+ * @param {ITransaction} transaction Transaction whose state is looked up.
+ * @param {AbortSignal} [signal] Abort signal for the request.
+ * @returns {Promise<InclusionProof|null>} The verified proof of this transaction, or null when
+ *   the state is not certified yet or the proof does not verify.
+ * @throws {StateAlreadyCertifiedError} If the state was certified with another transaction.
+ */
+export async function findCertifiedProof(
+  client: StateTransitionClient,
+  context: VerificationContext,
+  transaction: ITransaction,
+  signal?: AbortSignal,
+): Promise<InclusionProof | null> {
+  const stateId = await StateId.fromTransaction(transaction);
+  let proof: InclusionProof | null;
+  try {
+    proof = (await client.getInclusionProof(stateId, { signal })).inclusionProof;
+  } catch (error) {
+    if (error instanceof JsonRpcNetworkError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+  if (proof === null) {
+    return null;
+  }
+  const certified = proof;
+  const verify = async (transactionHash: DataHash): Promise<InclusionProofVerificationStatus> =>
+    (
+      await InclusionProofVerificationRule.verify(
+        context.trustBase,
+        context.predicateVerifier,
+        context.unicityCertificateVerifier,
+        certified,
+        transactionHash,
+        transaction.expiresAt,
+        transaction.lockScript,
+        transaction.sourceStateHash,
+      )
+    ).status;
+
+  const status = await verify(await transaction.calculateTransactionHash());
+  if (status === InclusionProofVerificationStatus.OK) {
+    return certified;
+  }
+  if (
+    status === InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH &&
+    (await verify(certified.certificationData.transactionHash)) === InclusionProofVerificationStatus.OK
+  ) {
+    throw new StateAlreadyCertifiedError(certified);
+  }
+  return null;
+}
 
 /**
  * Submit a certification request and wait for its inclusion proof.
  *
- * An unknown status is a warning rather than a failure: the aggregator answers a
- * repeated request with `STATE_ID_EXISTS`, which the SDK does not list, and the
- * proof that then arrives is checked against this transaction's hash anyway.
+ * `STATE_ID_EXISTS` means the aggregator already holds a request for this state.
+ * If it is this transaction, a repeated run, the proof it holds is returned; if
+ * it is another, {@link StateAlreadyCertifiedError} says so. Any other status the
+ * SDK does not list is a warning rather than a failure, and the proof that then
+ * arrives is checked against this transaction's hash anyway.
  *
  * @param {StateTransitionClient} client Aggregator client.
  * @param {VerificationContext} context Verification context for the network behind the client.
@@ -56,6 +134,7 @@ const SUCCESS_STATUS: string = CertificationStatus.SUCCESS;
  * @param {ICertifyOptions} options Timeout, poll interval, abort signal, warning sink.
  * @returns {Promise<InclusionProof>} Verified inclusion proof.
  * @throws {StampError} If the aggregator returns a known failure status.
+ * @throws {StateAlreadyCertifiedError} If the state was certified with another transaction.
  * @throws {SleepError} If the proof does not arrive before the timeout or abort.
  */
 export async function certifyTransaction(
@@ -66,7 +145,13 @@ export async function certifyTransaction(
   options: ICertifyOptions = {},
 ): Promise<InclusionProof> {
   const response = await client.submitCertificationRequest(certificationData, { signal: options.signal });
-  if (response.status !== SUCCESS_STATUS) {
+  const exists = response.status === STATE_ID_EXISTS_STATUS;
+  if (exists) {
+    const proof = await findCertifiedProof(client, context, transaction, options.signal);
+    if (proof !== null) {
+      return proof;
+    }
+  } else if (response.status !== SUCCESS_STATUS) {
     if (KNOWN_STATUSES.includes(response.status)) {
       throw new StampError(response.status);
     }
@@ -79,15 +164,24 @@ export async function certifyTransaction(
   if (options.signal) {
     signals.push(options.signal);
   }
-  return waitInclusionProof(
-    client,
-    context.trustBase,
-    context.predicateVerifier,
-    context.unicityCertificateVerifier,
-    transaction,
-    AbortSignal.any(signals),
-    options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-  );
+  try {
+    return await waitInclusionProof(
+      client,
+      context.trustBase,
+      context.predicateVerifier,
+      context.unicityCertificateVerifier,
+      transaction,
+      AbortSignal.any(signals),
+      options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    );
+  } catch (error) {
+    // The earlier request was still waiting for its round. The SDK reports a proof
+    // of another transaction only as a plain Error, so look again to say what it is.
+    if (exists && !(error instanceof SleepError)) {
+      await findCertifiedProof(client, context, transaction, options.signal);
+    }
+    throw error;
+  }
 }
 
 /**

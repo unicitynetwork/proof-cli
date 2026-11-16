@@ -1,5 +1,6 @@
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
+import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
 import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
@@ -17,6 +18,7 @@ import { TokenSalt } from '@unicitylabs/state-transition-sdk/lib/transaction/Tok
 import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
 import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/TypedArrayUtils.js';
 
+import { StateAlreadyCertifiedError } from './errors.js';
 import {
   LINEAGE_TAG,
   LINEAGE_TOKEN_TYPE,
@@ -25,7 +27,7 @@ import {
   sealPredicate,
 } from './LineagePayload.js';
 import { createLineageVerificationContext, verifyLineage } from './LineageVerification.js';
-import { ICertifyOptions, certifyMintTransaction, certifyTransaction } from './TimestampClient.js';
+import { ICertifyOptions, certifyMintTransaction, certifyTransaction, findCertifiedProof } from './TimestampClient.js';
 
 /** Thrown when a revision cannot be appended to the given token with the given key. */
 export class LineageError extends Error {
@@ -33,9 +35,10 @@ export class LineageError extends Error {
     message: string,
     /**
      * `INVALID_TOKEN`: the token does not verify as a lineage; `WRONG_KEY`: the key
-     * cannot append to it; `FINALIZED`: the lineage is sealed and nothing can.
+     * cannot append to it; `FINALIZED`: the lineage is sealed and nothing can;
+     * `ALREADY_CERTIFIED`: this revision slot was already certified with other content.
      */
-    public readonly code: 'FINALIZED' | 'INVALID_TOKEN' | 'WRONG_KEY',
+    public readonly code: 'ALREADY_CERTIFIED' | 'FINALIZED' | 'INVALID_TOKEN' | 'WRONG_KEY',
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -205,6 +208,23 @@ export async function createLineage(
 }
 
 /**
+ * Check, without network contact, that `token` is a valid lineage on the network of `trustBase`.
+ *
+ * @param {Token} token Lineage token.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @throws {LineageError} `INVALID_TOKEN` if it does not verify.
+ */
+export async function assertValidLineage(token: Token, trustBase: RootTrustBase): Promise<void> {
+  const result = await verifyLineage(token, trustBase);
+  if (result.status !== 'OK') {
+    throw new LineageError(
+      `The token file is not a valid document lineage token: ${result.reason ?? 'unknown'}`,
+      'INVALID_TOKEN',
+    );
+  }
+}
+
+/**
  * Check, without network contact, that `producerPrivateKey` can append to `token`
  * on the network of `trustBase`: the token is a valid lineage for that network and
  * its latest state is locked to that key's `P_sig`.
@@ -219,13 +239,7 @@ export async function assertCanAppend(
   trustBase: RootTrustBase,
   producerPublicKey: Uint8Array,
 ): Promise<void> {
-  const result = await verifyLineage(token, trustBase);
-  if (result.status !== 'OK') {
-    throw new LineageError(
-      `The token file is not a valid document lineage token: ${result.reason ?? 'unknown'}`,
-      'INVALID_TOKEN',
-    );
-  }
+  await assertValidLineage(token, trustBase);
   if (isFinalized(token)) {
     throw new LineageError('The lineage is finalized; no revision can follow its sealed final revision.', 'FINALIZED');
   }
@@ -244,11 +258,197 @@ export async function assertCanAppend(
   }
 }
 
+/** A revision ready to submit: the transfer and the request that certifies it. */
+export interface IPreparedRevision {
+  readonly certificationData: CertificationData;
+  readonly index: bigint;
+  readonly transaction: TransferTransaction;
+}
+
 /**
- * Append the next revision: a transfer, signed under the `P_sig` the previous
- * revision named, whose auxiliary data is `[i, digest]` and whose recipient is the
- * producer of revision `i + 1`; or, without a next producer, the seal
- * `["seal", i, digest]`, burning the token.
+ * Build, without network contact, the next revision of `token`: a transfer, signed
+ * under the `P_sig` the previous revision named, whose auxiliary data is
+ * `[i, digest]` and whose recipient is the producer of revision `i + 1`; or,
+ * without a next producer, the seal `["seal", i, digest]`, burning the token.
+ * The state mask is derived, so the same inputs always give the same transfer.
+ *
+ * @param {Token} token Existing lineage token.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {Uint8Array} digest 32-byte SHA-256 digest of the new revision.
+ * @param {Uint8Array} producerPrivateKey Key named by the latest revision; signs the transfer.
+ * @param {Uint8Array|null} nextProducer Compressed public key of whoever produces the following revision; null to finalize.
+ * @returns {Promise<IPreparedRevision>} The transfer, its index and its certification request.
+ * @throws {LineageError} If the token is invalid or the key cannot append to it.
+ */
+export async function prepareRevision(
+  token: Token,
+  trustBase: RootTrustBase,
+  digest: Uint8Array,
+  producerPrivateKey: Uint8Array,
+  nextProducer: Uint8Array | null,
+): Promise<IPreparedRevision> {
+  const signer = new SigningService(producerPrivateKey);
+  await assertCanAppend(token, trustBase, signer.publicKey);
+
+  const index = nextRevisionIndex(token);
+  const { auxData, recipient } = await revisionStep(index, digest, nextProducer);
+  const transaction = await TransferTransaction.create(
+    token,
+    recipient,
+    await deriveStateMask(producerPrivateKey, token),
+    { data: auxData },
+  );
+  const certificationData = await CertificationData.fromTransaction(
+    transaction,
+    await SignaturePredicateUnlockScript.create(transaction, signer),
+  );
+  return { certificationData, index, transaction };
+}
+
+/**
+ * @param {Token} token Lineage token.
+ * @returns {bigint} Index of the revision that would be appended next.
+ */
+export function nextRevisionIndex(token: Token): bigint {
+  return BigInt(token.transactions.length + 1);
+}
+
+/**
+ * Whether `transaction` is the revision that `digest` and `nextProducer` would
+ * make at its position. Needs no key: it compares what the transfer carries.
+ *
+ * @param {TransferTransaction} transaction A lineage transfer.
+ * @param {bigint} index Its revision index.
+ * @param {Uint8Array} digest 32-byte SHA-256 digest.
+ * @param {Uint8Array|null} nextProducer Next producer's public key; null for a seal.
+ * @returns {Promise<boolean>} True when payload and recipient both match.
+ */
+export async function isSameRevision(
+  transaction: TransferTransaction,
+  index: bigint,
+  digest: Uint8Array,
+  nextProducer: Uint8Array | null,
+): Promise<boolean> {
+  const { auxData, recipient } = await revisionStep(index, digest, nextProducer);
+  const data = transaction.data;
+  return (
+    data !== null &&
+    areUint8ArraysEqual(data, auxData) &&
+    areUint8ArraysEqual(transaction.recipient.toCBOR(), EncodedPredicate.fromPredicate(recipient).toCBOR())
+  );
+}
+
+function alreadyCertified(index: bigint, cause: unknown): LineageError {
+  return new LineageError(
+    `Revision ${index} of this lineage was already certified with different content, probably by an earlier ` +
+      "interrupted run whose token file was not written. Run stamp-revision again with that run's digest and " +
+      'next producer to recover it.',
+    'ALREADY_CERTIFIED',
+    { cause },
+  );
+}
+
+/**
+ * Attach a certified transfer to the token and check it against the chain rules.
+ *
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {Token} token Lineage token the transfer continues.
+ * @param {TransferTransaction} transaction The transfer.
+ * @param {InclusionProof} proof Its inclusion proof.
+ * @param {ICertifyOptions} options Warning sink.
+ * @returns {Promise<Token>} The token with the transfer appended.
+ */
+async function attachRevision(
+  trustBase: RootTrustBase,
+  token: Token,
+  transaction: TransferTransaction,
+  proof: InclusionProof,
+  options: ICertifyOptions,
+): Promise<Token> {
+  const context = createLineageVerificationContext(trustBase);
+  const certified = await transaction.toCertifiedTransaction(
+    context.trustBase,
+    context.predicateVerifier,
+    context.unicityCertificateVerifier,
+    proof,
+  );
+  const appended = await token.transfer(certified, context);
+
+  // The SDK checks the new transfer on its own; the chain rules relate it to its
+  // predecessor. It is certified either way, so a violation is reported, not thrown.
+  const check = await verifyLineage(appended, trustBase);
+  if (check.status !== 'OK') {
+    options.onWarning?.(`The appended revision breaks a lineage rule: ${check.reason ?? 'unknown'}`);
+  }
+  return appended;
+}
+
+/**
+ * Submit a prepared revision and append it to the token once certified. A repeat
+ * of an already certified revision recovers it.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the network behind the client.
+ * @param {Token} token The token the revision was prepared for.
+ * @param {IPreparedRevision} prepared From {@link prepareRevision}.
+ * @param {ICertifyOptions} options Timeout, poll interval, abort signal, warning sink.
+ * @returns {Promise<Token>} The token with the new revision appended.
+ * @throws {LineageError} `ALREADY_CERTIFIED` if this revision slot holds another transfer.
+ */
+export async function certifyRevision(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  token: Token,
+  prepared: IPreparedRevision,
+  options: ICertifyOptions = {},
+): Promise<Token> {
+  const context = createLineageVerificationContext(trustBase);
+  let proof: InclusionProof;
+  try {
+    proof = await certifyTransaction(client, context, prepared.certificationData, prepared.transaction, options);
+  } catch (error) {
+    if (error instanceof StateAlreadyCertifiedError) {
+      throw alreadyCertified(prepared.index, error);
+    }
+    throw error;
+  }
+  return attachRevision(trustBase, token, prepared.transaction, proof, options);
+}
+
+/**
+ * Recover a revision that an earlier run submitted but did not record: if the
+ * aggregator certified `transaction`, append it to the token. Needs no key, and
+ * submits nothing.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the network behind the client.
+ * @param {Token} token The token the transfer continues.
+ * @param {TransferTransaction} transaction The transfer the earlier run submitted.
+ * @param {ICertifyOptions} options Abort signal, warning sink.
+ * @returns {Promise<Token|null>} The token with the revision appended, or null if it is not certified.
+ * @throws {LineageError} `ALREADY_CERTIFIED` if the slot holds another transfer instead.
+ */
+export async function recoverRevision(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  token: Token,
+  transaction: TransferTransaction,
+  options: ICertifyOptions = {},
+): Promise<Token | null> {
+  let proof: InclusionProof | null;
+  try {
+    proof = await findCertifiedProof(client, createLineageVerificationContext(trustBase), transaction, options.signal);
+  } catch (error) {
+    if (error instanceof StateAlreadyCertifiedError) {
+      throw alreadyCertified(nextRevisionIndex(token), error);
+    }
+    throw error;
+  }
+  return proof === null ? null : attachRevision(trustBase, token, transaction, proof, options);
+}
+
+/**
+ * Append the next revision: {@link prepareRevision}, then {@link certifyRevision}.
  *
  * @param {StateTransitionClient} client Aggregator client.
  * @param {RootTrustBase} trustBase Trust base of the network behind the client.
@@ -268,36 +468,6 @@ export async function appendRevision(
   nextProducer: Uint8Array | null,
   options: ICertifyOptions = {},
 ): Promise<Token> {
-  const signer = new SigningService(producerPrivateKey);
-  await assertCanAppend(token, trustBase, signer.publicKey);
-
-  const index = BigInt(token.transactions.length + 1);
-  const { auxData, recipient } = await revisionStep(index, digest, nextProducer);
-  const transaction = await TransferTransaction.create(
-    token,
-    recipient,
-    await deriveStateMask(producerPrivateKey, token),
-    { data: auxData },
-  );
-  const certificationData = await CertificationData.fromTransaction(
-    transaction,
-    await SignaturePredicateUnlockScript.create(transaction, signer),
-  );
-  const context = createLineageVerificationContext(trustBase);
-  const proof = await certifyTransaction(client, context, certificationData, transaction, options);
-  const certified = await transaction.toCertifiedTransaction(
-    context.trustBase,
-    context.predicateVerifier,
-    context.unicityCertificateVerifier,
-    proof,
-  );
-  const appended = await token.transfer(certified, context);
-
-  // The SDK checks the new transfer on its own; the chain rules relate it to its
-  // predecessor. It is certified either way, so a violation is reported, not thrown.
-  const check = await verifyLineage(appended, trustBase);
-  if (check.status !== 'OK') {
-    options.onWarning?.(`The appended revision breaks a lineage rule: ${check.reason ?? 'unknown'}`);
-  }
-  return appended;
+  const prepared = await prepareRevision(token, trustBase, digest, producerPrivateKey, nextProducer);
+  return certifyRevision(client, trustBase, token, prepared, options);
 }

@@ -456,6 +456,7 @@ export interface IStampRevisionFlags extends INetworkFlags {
   readonly file?: string;
   readonly finalize?: boolean;
   readonly keyFile?: string;
+  readonly quiet?: boolean;
   readonly recipientKey?: string;
   readonly recipientKeyFile?: string;
   readonly timeout?: string;
@@ -469,6 +470,8 @@ export interface IStampRevisionConfig {
   readonly network: ITimestampNetwork;
   /** Signs the new revision: the genesis reason for a new lineage, the transfer otherwise. */
   readonly privateKey: Uint8Array;
+  /** Leave the pending revision off stderr once its journal file is written. */
+  readonly quiet: boolean;
   /**
    * Compressed public key of whoever produces the following revision; null to
    * finalize, sealing this revision as the last one.
@@ -624,5 +627,6 @@ export async function resolveStampRevisionConfig(
   }
 
   const digest = (await resolveDigest(digestArgument, flags.file)) as Uint8Array;
-  return { allowInsecure, apiKey, digest, network, privateKey, recipientKey, timeoutMs, tokenBytes, tokenFile };
+  const quiet = flags.quiet ?? false;
+  return { allowInsecure, apiKey, digest, network, privateKey, quiet, recipientKey, timeoutMs, tokenBytes, tokenFile };
 }

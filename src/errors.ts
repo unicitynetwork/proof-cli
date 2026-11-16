@@ -8,7 +8,7 @@ import { errorMessage, StampError } from './lib/errors.js';
 import { LineageError } from './lib/LineageClient.js';
 
 export const EXIT_OK = 0;
-/** Verification failed, hash mismatch, or the input is not a token. */
+/** Verification failed, hash mismatch, the input is not a token, or a lineage revision slot is taken. */
 export const EXIT_VERIFICATION_FAILED = 1;
 /** Usage or configuration error. */
 export const EXIT_USAGE = 2;
@@ -71,7 +71,7 @@ export function toExitCode(error: unknown, interrupted = false): number {
     return EXIT_VERIFICATION_FAILED;
   }
   if (error instanceof LineageError) {
-    return error.code === 'INVALID_TOKEN' ? EXIT_VERIFICATION_FAILED : EXIT_USAGE;
+    return error.code === 'INVALID_TOKEN' || error.code === 'ALREADY_CERTIFIED' ? EXIT_VERIFICATION_FAILED : EXIT_USAGE;
   }
   return EXIT_USAGE;
 }

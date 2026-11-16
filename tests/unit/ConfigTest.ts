@@ -403,6 +403,8 @@ describe('resolveStampRevisionConfig', () => {
     expect(config.privateKey).toEqual(TEST_PRIVATE_KEY);
     expect(HexConverter.encode(config.recipientKey as Uint8Array)).toEqual(TEST_PUBLIC_KEY_HEX);
     expect(config.network.preset).toEqual('mainnet');
+    expect(config.quiet).toBe(false);
+    expect((await resolveStampRevisionConfig(TEST_DIGEST_HEX, { ...base(), quiet: true }, env)).quiet).toBe(true);
   });
 
   it('reads an existing token file and a recipient key file', async () => {

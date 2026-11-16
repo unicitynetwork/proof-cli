@@ -1,8 +1,24 @@
+import type { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
+
 /** The aggregator refused the certification request with a status the SDK knows. */
 export class StampError extends Error {
   public constructor(public readonly status: string) {
     super(`Aggregator rejected the certification request: ${status}`);
     this.name = 'StampError';
+  }
+}
+
+/**
+ * The state the transaction spends was already certified, with a different
+ * transaction: the slot is taken, and this transaction can never be certified.
+ */
+export class StateAlreadyCertifiedError extends Error {
+  /**
+   * @param {InclusionProof} proof Authenticated proof of the transaction that was certified instead.
+   */
+  public constructor(public readonly proof: InclusionProof) {
+    super('The aggregator already certified a different transaction for this state.');
+    this.name = 'StateAlreadyCertifiedError';
   }
 }
 

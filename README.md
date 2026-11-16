@@ -133,7 +133,11 @@ unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file 
 - The salt, and so the token id, is derived from the issuer's private key, the recipient and revision 0, not drawn at random. Running an interrupted genesis again with the same file, key, digest and recipient therefore recovers the same lineage instead of starting a parallel one. Nobody without the issuer's key can compute the token id before the genesis is certified, so nobody can mint into its slot first. Starting a second, separate lineage from the same document needs a different first producer (or issuer).
 - If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. The file is replaced atomically, and on any write failure the full token is printed as hex.
 - `--finalize` makes this revision the final one, a *seal*: its auxiliary data is `CBOR["seal", i, SHA-256(doc_i)]` and its recipient is the burn predicate `P_burn(SHA-256(auxiliary data))`, which no key can unlock. Appending to a finalized lineage fails before contacting the gateway (exit 2). On a new lineage, `--finalize` mints revision 0 as a seal: a single-revision document that is final from the start.
-- The state mask of each step is derived from the producer's key and the spent state, so if the command is interrupted after certification, running the same command again with the same file, key, digest and recipient recovers the same revision.
+- **Interrupted appends are recovered from a journal.** Before an append is submitted, the revision is recorded in a journal next to the token file, `.<name>.pending` (`.doc.lineage.pending` for `doc.lineage`), and echoed to stderr; `--quiet` leaves the echo out once the journal is written. The journal is removed once the token file holds the revision. The aggregator keeps only a hash of each transfer, so until then the journal is the only record of what was certified; do not delete it by hand.
+  - If the command is interrupted after submitting, running `stamp-revision` again on the same token file recovers the revision from the journal, whatever it is given this time. If the digest and recipient are the same, that completes the command. If not, the recovered revision is still written and echoed to stderr, the requested one is not appended, and the command exits 1.
+  - Without the journal, the same command with the same file, key, digest and recipient still recovers the revision, because the state mask of each step is derived from the producer's key and the spent state. With any other digest or recipient it exits 1, saying the revision was already certified with different content, and echoes what it tried to stderr even with `--quiet`. Only the interrupted run's digest and recipient can recover it then, which is what the echo is for.
+  - A journal the command cannot place (for another lineage, for a later revision than the token file holds, or unreadable) stops it with exit 2 and is left alone.
+  - A new lineage needs no journal: its genesis is derived from its inputs, and running it again with the same file, key, digest and recipient recovers it (see above).
 - Network options behave as for `stamp`.
 
 `verify` and `inspect` recognise lineage tokens by their token type and list every revision with its hash, signer, next producer and certification time:
@@ -212,7 +216,7 @@ unicity-proof verify document.cbor --file document.pdf --json | jq -r .reference
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
-| 1 | Verification failed, hash or token id mismatch, or the input is not a token. |
+| 1 | Verification failed, hash or token id mismatch, or the input is not a token. For `stamp-revision`: the revision was already certified with different content. |
 | 2 | Usage or configuration error. |
 | 3 | Network error, aggregator rejection, or timeout. |
 | 130 | Interrupted. |

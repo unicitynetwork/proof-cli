@@ -8,6 +8,7 @@ import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verifi
 
 import { CliError, describeError, toExitCode, usageError } from '../../src/errors.js';
 import { StampError } from '../../src/lib/errors.js';
+import { LineageError } from '../../src/lib/LineageClient.js';
 
 function errno(code: string, path?: string): NodeJS.ErrnoException {
   const error: NodeJS.ErrnoException = new Error(`${code}: ${path ?? ''}`);
@@ -29,6 +30,10 @@ describe('toExitCode', () => {
     ['JSON-RPC error object', new JsonRpcDataError({ code: -32000, message: 'denied' }), 3],
     ['fetch connection failure', new TypeError('fetch failed'), 3],
     ['token failed SDK verification', new VerificationError('bad token', failed), 1],
+    ['not a valid lineage token', new LineageError('x', 'INVALID_TOKEN'), 1],
+    ['lineage revision slot already taken', new LineageError('x', 'ALREADY_CERTIFIED'), 1],
+    ['wrong key for the lineage', new LineageError('x', 'WRONG_KEY'), 2],
+    ['finalized lineage', new LineageError('x', 'FINALIZED'), 2],
     ['file not found', errno('ENOENT', '/x'), 2],
     ['file exists', errno('EEXIST', '/x'), 2],
     ['anything else', new Error('?'), 2],

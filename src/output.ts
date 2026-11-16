@@ -455,6 +455,61 @@ export function revisionJson(summary: IRevisionSummary): IRevisionJson {
   };
 }
 
+/** A revision recorded in a journal file, for the notes `stamp-revision` prints on stderr. */
+export interface IPendingRevisionNote {
+  readonly digest: Uint8Array;
+  readonly journalFile: string;
+  /** Null when the revision is a seal. */
+  readonly nextProducer: Uint8Array | null;
+  readonly revision: bigint;
+  readonly tokenId: Uint8Array;
+}
+
+/**
+ * Why a pending revision is being printed: `submitting` before it goes to the
+ * aggregator; `rejected` when its slot turned out to be taken; `recovered` when it
+ * was certified by an earlier run and has just been written to the token file.
+ */
+export type PendingRevisionContext = 'recovered' | 'rejected' | 'submitting';
+
+/**
+ * The contents of a revision journal, for stderr: enough to recover the revision
+ * by hand if the journal itself is lost.
+ *
+ * @param {IPendingRevisionNote} note The revision.
+ * @param {PendingRevisionContext} context Why it is being printed.
+ * @returns {string} Lines for stderr, ending in a newline.
+ */
+export function pendingRevisionLines(note: IPendingRevisionNote, context: PendingRevisionContext): string {
+  const heading = {
+    recovered: `Recovered revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}, certified by an interrupted run:`,
+    rejected: `Revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}, as this run submitted it (not certified):`,
+    submitting: `Submitting revision ${note.revision} of lineage ${HexConverter.encode(note.tokenId)}:`,
+  }[context];
+  const lines = [
+    heading,
+    `  ${line('Stamped', `SHA-256 ${HexConverter.encode(note.digest)}`)}`,
+    `  ${line('Next producer', keyLabel(note.nextProducer, FINALIZED_LABEL))}`,
+  ];
+  if (context === 'submitting') {
+    lines.push(
+      `  ${line('Journal', note.journalFile)}`,
+      'If this run is interrupted, run stamp-revision on the same token file again to recover the revision;',
+      'without the journal, run it with this digest and next producer.',
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * @param {bigint} revision Revision index.
+ * @param {string} journalFile Journal it came from.
+ * @returns {string} Note for stderr that a revision was recovered.
+ */
+export function recoveredRevisionLine(revision: bigint, journalFile: string): string {
+  return `Recovered revision ${revision} from the journal ${journalFile} of an interrupted run.\n`;
+}
+
 /**
  * Last resort for a revision that was certified but could not be written.
  *
