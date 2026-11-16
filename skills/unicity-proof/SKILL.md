@@ -28,7 +28,11 @@ holds several revisions. With `--file` it passes if **any** revision carries the
 file's hash, so read the `Expected hash` line in full: `matches revision 1;
 superseded by revision 2` means the file is a genuine but outdated revision.
 `matches revision 2 (the final)` means the lineage was finalized with that
-revision (`--finalize`); no later revision can exist.
+revision (`--finalize`); no later revision can exist. `matches revision 2 (the
+latest in this file)` does **not** mean the file is current: any older copy of
+an unsealed lineage still verifies, and verification is offline, so later
+revisions may have been certified since. Only `(the final)` rules them out; if
+being current matters, ask whoever holds the lineage for the current file.
 
 A matching hash does not say *which* lineage the file is in: one issuer can
 start several certified lineages from the same document. Only the token id

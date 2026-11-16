@@ -168,7 +168,7 @@ describe('runVerify on a document lineage', () => {
   it('finds an expected hash among the revisions', async () => {
     const latest = testContext();
     await runVerify(fixture.tokenFile, { hash: THIRD_DIGEST_HEX, trustBase: fixture.trustBaseFile }, latest.context);
-    expect(latest.stdout()).toContain('Expected hash  matches revision 2 (the latest)\n');
+    expect(latest.stdout()).toContain('Expected hash  matches revision 2 (the latest in this file)\n');
 
     const older = testContext({ json: true });
     expect(
@@ -315,9 +315,9 @@ describe('verify output for a document lineage', () => {
 
   it.each<[string, readonly number[] | null, string]>([
     ['no digest given', null, 'not checked; pass --file or --hash to find your document in the lineage'],
-    ['the latest revision', [2], 'matches revision 2 (the latest)'],
+    ['the last revision in the file', [2], 'matches revision 2 (the latest in this file)'],
     ['an older revision', [1], 'matches revision 1; superseded by revision 2'],
-    ['several revisions', [0, 2], 'matches revisions 0, 2 (the latest)'],
+    ['several revisions', [0, 2], 'matches revisions 0, 2 (the latest in this file)'],
     ['no revision', [], 'differs from every revision'],
   ])('labels the expected hash when it matches %s', (_, matchingRevisions, label) => {
     expect(lineageVerifyText(result({ matchingRevisions }), bundled)).toContain(`Expected hash  ${label}\n`);

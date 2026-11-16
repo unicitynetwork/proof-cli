@@ -704,7 +704,10 @@ function lineageExpectedHashLabel(result: ILineageVerificationResult): string {
   if (last !== latest) {
     return `${which}; superseded by revision ${latest}`;
   }
-  return `${which} (the ${result.description.finalized ? 'final' : 'latest'})`;
+  // A seal is a burn, so nothing can follow it. Without one, every earlier state of
+  // the lineage is itself a valid token, and offline verification cannot tell
+  // whether later revisions were certified after this file was made.
+  return `${which} (${result.description.finalized ? 'the final' : 'the latest in this file'})`;
 }
 
 // Like the expected hash: without an id there is no telling this lineage from a
