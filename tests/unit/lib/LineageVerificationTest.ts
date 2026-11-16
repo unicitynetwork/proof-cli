@@ -1,12 +1,22 @@
+import { createHash } from 'node:crypto';
+
+import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
+import { SignaturePredicateUnlockScript } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicateUnlockScript.js';
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 import type { IPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/IPredicate.js';
 import { CborSerializer } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
+import { CertifiedTransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedTransferTransaction.js';
+import { MintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/MintTransaction.js';
+import { StateMask } from '@unicitylabs/state-transition-sdk/lib/transaction/StateMask.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { TokenId } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenId.js';
 import { TokenSalt } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenSalt.js';
+import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
+import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
+import { VerificationStatus } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationStatus.js';
 
 import { createLineage } from '../../../src/lib/LineageClient.js';
 import {
@@ -15,8 +25,13 @@ import {
   LineageRevision,
   sealPredicate,
 } from '../../../src/lib/LineagePayload.js';
-import { describeLineage, verifyLineage } from '../../../src/lib/LineageVerification.js';
+import {
+  createLineageVerificationContext,
+  describeLineage,
+  verifyLineage,
+} from '../../../src/lib/LineageVerification.js';
 import { bundledTrustBase } from '../../../src/lib/networks.js';
+import { certifyMintTransaction, certifyTransaction } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST } from '../../support/fixtures.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 import { certifyMint } from '../../support/TimestampFixtures.js';
@@ -184,6 +199,164 @@ describe('LineageVerification', () => {
       const result = await verifyLineage(await signedGenesis(data, await sealPredicate(other)), trustBase);
       expect(result.status).toEqual('FAIL');
       expect(result.reason).toEqual('Revision 0 is a seal, but its burn reason does not commit to it.');
+    });
+  });
+
+  describe('chain rules', () => {
+    interface IRawTransfer {
+      readonly certificationData: CertificationData;
+      readonly transaction: TransferTransaction;
+    }
+
+    /**
+     * A transfer out of the latest state of `source`, with any payload and
+     * recipient, signed by `producer`, bypassing the checks appendRevision makes.
+     * `source` need only offer its latest transaction, so a transfer can be built
+     * on one that is not certified yet.
+     */
+    async function rawTransfer(
+      source: Pick<Token, 'latestTransaction'>,
+      producer: Uint8Array,
+      data: Uint8Array,
+      recipient: IPredicate,
+    ): Promise<IRawTransfer> {
+      const transaction = await TransferTransaction.create(source as Token, recipient, StateMask.generate(), { data });
+      const certificationData = await CertificationData.fromTransaction(
+        transaction,
+        await SignaturePredicateUnlockScript.create(transaction, new SigningService(producer)),
+      );
+      return { certificationData, transaction };
+    }
+
+    async function certify(raw: IRawTransfer): Promise<CertifiedTransferTransaction> {
+      const context = createLineageVerificationContext(trustBase);
+      const proof = await certifyTransaction(client, context, raw.certificationData, raw.transaction, fast);
+      return raw.transaction.toCertifiedTransaction(
+        trustBase,
+        context.predicateVerifier,
+        context.unicityCertificateVerifier,
+        proof,
+      );
+    }
+
+    async function attach(token: Token, ...transfers: CertifiedTransferTransaction[]): Promise<Token> {
+      let result = token;
+      for (const transfer of transfers) {
+        result = await result.transfer(transfer, createLineageVerificationContext(trustBase));
+      }
+      return result;
+    }
+
+    /** Names of the failing rules anywhere in the result tree. */
+    function failedRules(result: VerificationResult<unknown> | null): string[] {
+      if (result === null) {
+        return [];
+      }
+      const own = result.status === VerificationStatus.OK ? [] : [result.rule];
+      return [...own, ...result.results.flatMap(failedRules)];
+    }
+
+    // The aggregator is shared and a genesis is deterministic in its inputs, so each
+    // test starts its own lineage from a digest of its own.
+    let lineages = 0;
+    function freshGenesis(): Promise<Token> {
+      lineages += 1;
+      const digest = new Uint8Array(createHash('sha256').update(`chain rules ${lineages}`).digest());
+      return createLineage(client, trustBase, digest, alice, publicKey(bob), fast);
+    }
+
+    const revision = (index: bigint, digest = OTHER_DIGEST): Uint8Array =>
+      LineageRevision.create(index, digest).toCBOR();
+    const pSig = (key: Uint8Array): IPredicate => SignaturePredicate.create(publicKey(key));
+
+    it('accepts revisions appended in order, the control for the cases below', async () => {
+      const genesis = await freshGenesis();
+      const first = await rawTransfer(genesis, bob, revision(1n), pSig(carol));
+      const second = await rawTransfer({ latestTransaction: first.transaction }, carol, revision(2n), pSig(alice));
+      const token = await attach(genesis, await certify(first), await certify(second));
+      const result = await verifyLineage(token, trustBase);
+      expect(result.reason).toBeNull();
+      expect(result.status).toEqual('OK');
+    });
+
+    it('rejects a transfer claiming another index than its position', async () => {
+      const genesis = await freshGenesis();
+      // A producer controls the payload of their own transfer, so a wrong index is a realistic input.
+      const skipped = await rawTransfer(genesis, bob, revision(5n), pSig(carol));
+      const result = await verifyLineage(await attach(genesis, await certify(skipped)), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Revision at position 1 claims index 5.');
+      expect(failedRules(result.details)).toContain('Revision[1]IndexSequential');
+    });
+
+    it('rejects a transfer repeating the previous index, further down the chain', async () => {
+      const genesis = await freshGenesis();
+      const first = await rawTransfer(genesis, bob, revision(1n), pSig(carol));
+      const repeat = await rawTransfer({ latestTransaction: first.transaction }, carol, revision(1n), pSig(alice));
+      const token = await attach(genesis, await certify(first), await certify(repeat));
+      const result = await verifyLineage(token, trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual('Revision at position 2 claims index 1.');
+    });
+
+    // States can be precomputed and certified out of order: the protocol links each
+    // transfer to the state before it, not to the time it was certified.
+    it('rejects a revision certified before the one it follows', async () => {
+      const genesis = await freshGenesis();
+      const first = await rawTransfer(genesis, bob, revision(1n), pSig(carol));
+      const second = await rawTransfer({ latestTransaction: first.transaction }, carol, revision(2n), pSig(alice));
+      const certifiedSecond = await certify(second);
+      const certifiedFirst = await certify(first);
+      expect(certifiedSecond.referenceTime).toBeLessThan(certifiedFirst.referenceTime);
+
+      const result = await verifyLineage(await attach(genesis, certifiedFirst, certifiedSecond), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toEqual(
+        `Revision 2 is certified at ${certifiedSecond.referenceTime}, before revision 1 at ${certifiedFirst.referenceTime}.`,
+      );
+      expect(failedRules(result.details)).toContain('Revision[2]TimeMonotone');
+    });
+
+    it('rejects a transfer certified before the genesis it follows', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST).toCBOR();
+      // Build the genesis, and the transfer out of it, before certifying either.
+      const salt = TokenSalt.generate();
+      const tokenId = await TokenId.fromSalt(trustBase.networkId, salt);
+      const reason = await LineageGenesisReason.sign(
+        tokenId,
+        LINEAGE_TOKEN_TYPE,
+        EncodedPredicate.fromPredicate(pSig(bob)),
+        data,
+        new SigningService(alice),
+      );
+      const mint = await MintTransaction.create(trustBase.networkId, pSig(bob), {
+        data,
+        justification: reason.toCBOR(),
+        salt,
+        tokenType: LINEAGE_TOKEN_TYPE,
+      });
+      const first = await rawTransfer({ latestTransaction: mint }, bob, revision(1n), pSig(carol));
+      const certifiedFirst = await certify(first);
+      const context = createLineageVerificationContext(trustBase);
+      const genesis = await Token.mint(await certifyMintTransaction(client, context, mint, fast), context);
+
+      const result = await verifyLineage(await attach(genesis, certifiedFirst), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(result.reason).toMatch(/^Revision 1 is certified at \d+, before revision 0 at \d+\.$/);
+    });
+
+    // Defence in depth: a seal is burned and nothing can spend a burn, so a token with
+    // a revision after a seal fails other rules first. Here the seal is minted to a key
+    // instead, which SealBurned rejects, and SealIsLast must reject it as well.
+    it('rejects a seal that revisions follow', async () => {
+      const data = LineageRevision.create(0n, TEST_DIGEST, true).toCBOR();
+      const genesis = await signedGenesis(data, pSig(bob));
+      const next = await rawTransfer(genesis, bob, revision(1n), pSig(carol));
+      const result = await verifyLineage(await attach(genesis, await certify(next)), trustBase);
+      expect(result.status).toEqual('FAIL');
+      expect(failedRules(result.details)).toEqual(
+        expect.arrayContaining(['Revision[0]SealBurned', 'Revision[0]SealIsLast']),
+      );
     });
   });
 
