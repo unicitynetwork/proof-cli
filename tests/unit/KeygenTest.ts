@@ -1,4 +1,4 @@
-import { chmod, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { runKeygen } from '../../src/commands/keygen.js';
@@ -35,6 +35,22 @@ describe('runKeygen under a umask that masks owner bits', () => {
     await runKeygen({ force: true, out }, testContext().context);
     expect((await stat(out)).mode & 0o777).toBe(0o600);
     expect((await readFile(out, 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('runKeygen and symlinks', () => {
+  it('refuses a symlink without --force, and replaces the link, not its target, with it', async () => {
+    const directory = await tempDir('proof-cli-keygen-link-');
+    const target = path.join(directory, 'target');
+    await writeFile(target, 'placeholder\n');
+    const out = path.join(directory, 'link.key');
+    await symlink(target, out);
+    await expect(runKeygen({ out }, testContext().context)).rejects.toMatchObject({ code: 'EEXIST', path: out });
+    await runKeygen({ force: true, out }, testContext().context);
+    expect((await lstat(out)).isSymbolicLink()).toBe(false);
+    expect((await stat(out)).mode & 0o777).toBe(0o600);
+    expect(await readFile(target, 'utf8')).toEqual('placeholder\n');
+    expect((await readdir(directory)).sort()).toEqual(['link.key', 'target']);
   });
 });
 

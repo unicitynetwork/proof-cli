@@ -81,6 +81,9 @@ without it the proof is gone.
   the genesis is certified: run the same command with another `--token-file` to
   recover it. `--force` only overwrites for a new lineage; never use it to
   "replace" an existing token file (it refuses).
+- **Exit 1 saying the token file `is not a token`, with no lineage yet:** an
+  earlier run may have failed writing it. Move the file away (don't delete it)
+  and run the same command again; the lineage is recovered.
 - **Every `stamp-revision` append needs the lineage's network.** The network is
   not read from the token file, so a testnet2 lineage needs `--network testnet2`
   each time. Exit 2 naming two networks means the configuration, not the token,

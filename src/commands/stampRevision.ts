@@ -1,6 +1,4 @@
-import { randomBytes } from 'node:crypto';
-import { lstat, rename, rm, stat, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { lstat, stat } from 'node:fs/promises';
 
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
@@ -13,6 +11,7 @@ import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/trans
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
 import { ICommandContext } from './context.js';
+import { IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from './durableFile.js';
 import {
   hasErrorCode,
   IPendingRevision,
@@ -87,20 +86,24 @@ async function tokenFileInTheWay(tokenFile: string, cause: unknown): Promise<Err
 }
 
 /**
- * Persist a lineage token whose newest revision has already been certified.
+ * Persist a lineage token whose newest revision has already been certified, with
+ * {@link writeFileDurably}: the token file never holds a partial token, a
+ * replaced one keeps its mode, and once this returns the write survives a power
+ * loss. The file is the only copy of every revision's transaction, so an append
+ * writes through a symlink at the path rather than replacing the symlink: a link
+ * into a shared folder keeps working.
  *
- * A new lineage is written with an exclusive create, unless `--force`, so a file
- * that appeared since the checks is never clobbered. An existing lineage is
- * replaced through a temporary file and `rename`, so the previous version stays
- * intact until the new one is complete: truncating it in place and then failing
- * would lose the whole history, not just the new revision. Whatever goes wrong,
- * the full token is printed as hex before the error propagates.
+ * A new lineage is linked into place, so a file that appeared since the checks is
+ * never clobbered, nor a symlink to a missing file written through, unless
+ * `--force`, which replaces the one and writes through the other. Whatever goes
+ * wrong, the full token is printed as hex before the error propagates.
  *
  * @param {string} tokenFile Absolute token file path.
  * @param {Uint8Array} bytes Encoded token.
  * @param {boolean} created Whether this is a new lineage.
  * @param {ICommandContext} context Streams.
  * @param {boolean} [force] For a new lineage, overwrite whatever is at the path, or write through a symlink.
+ * @param {IDurableFileSystem} [fs] File operations, for tests.
  */
 export async function writeRevisionToken(
   tokenFile: string,
@@ -108,25 +111,20 @@ export async function writeRevisionToken(
   created: boolean,
   context: ICommandContext,
   force = false,
+  fs: IDurableFileSystem = NODE_FILE_SYSTEM,
 ): Promise<void> {
-  const temporary = path.join(
-    path.dirname(tokenFile),
-    `.${path.basename(tokenFile)}.${randomBytes(8).toString('hex')}`,
-  );
+  const exclusive = created && !force;
   try {
-    if (created) {
-      await writeFile(tokenFile, bytes, { flag: force ? 'w' : 'wx' });
-    } else {
-      await writeFile(temporary, bytes, { flag: 'wx' });
-      await rename(temporary, tokenFile);
-    }
+    await writeFileDurably(
+      tokenFile,
+      bytes,
+      { followSymlinks: !exclusive, publish: exclusive ? 'create' : 'replace' },
+      fs,
+    );
   } catch (error) {
     // First, before anything awaited, so nothing can get between the error and the recovered bytes.
     context.stderr.write(revisionRecoveryLines(bytes));
-    if (!created) {
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
-    if (created && hasErrorCode(error, 'EEXIST')) {
+    if (exclusive && hasErrorCode(error, 'EEXIST')) {
       throw await tokenFileInTheWay(tokenFile, error);
     }
     throw error;
@@ -432,7 +430,11 @@ export async function stampRevisionWith(
   } else {
     const decoded = await decodeToken(tokenBytesFromInput(config.tokenBytes));
     if (decoded.token === null) {
-      throw new CliError(`${config.tokenFile} is ${decoded.error}.`, EXIT_VERIFICATION_FAILED);
+      throw new CliError(
+        `${config.tokenFile} is ${decoded.error}. If an earlier stamp-revision run failed while creating a new ` +
+          'lineage, move this file away and run the same command again: the lineage is recovered.',
+        EXIT_VERIFICATION_FAILED,
+      );
     }
     // Before the journal is read: a journal is only acted on against the right network.
     const mismatch = networkMismatch(

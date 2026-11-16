@@ -596,7 +596,9 @@ describe('stampRevisionWith', () => {
       client,
       testContext().context,
     );
-    await expect(attempt).rejects.toThrow(/is not a token/);
+    await expect(attempt).rejects.toThrow(
+      /is not a token.*\. If an earlier stamp-revision run failed while creating a new lineage, move this file away and run the same command again: the lineage is recovered\.$/,
+    );
     expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_VERIFICATION_FAILED);
   });
 });
