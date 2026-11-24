@@ -73,6 +73,10 @@ without it the proof is gone.
   content` means an earlier run certified something else for this revision:
   only that run's digest and recipient recover it, and they are on stderr from
   when it was submitted.
+- **Run one `stamp-revision` append per token file at a time.** Exit 2 saying
+  `Another stamp-revision run is appending` means wait for it. Delete the
+  `.<name>.lock` file only if no run is active (it holds no data); never delete
+  a journal.
 - **`(existing lineage, recovered)` means no new lineage was created.** The
   same issuer key, document and first producer always give the same lineage.
   If `stamp-revision` exits 1 saying `the lineage has moved on`, later

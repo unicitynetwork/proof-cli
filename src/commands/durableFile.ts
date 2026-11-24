@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, link, lstat, open, readlink, rename, rm, stat } from 'node:fs/promises';
+import { chmod, link, lstat, open, readFile, readlink, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /** A file just created by {@link IDurableFileSystem.openNew}. */
@@ -20,6 +20,7 @@ export interface IDurableFileSystem {
   lstat(file: string): Promise<{ isSymbolicLink(): boolean }>;
   /** Create `file` exclusively (`wx`) with `mode`, subject to the umask, and open it for writing. */
   openNew(file: string, mode: number): Promise<IWritableFile>;
+  readFile(file: string): Promise<Uint8Array>;
   readlink(file: string): Promise<string>;
   rename(from: string, to: string): Promise<void>;
   rm(file: string, options: { force: boolean }): Promise<void>;
@@ -33,6 +34,7 @@ export const NODE_FILE_SYSTEM: IDurableFileSystem = {
   link,
   lstat,
   openNew: (file, mode) => open(file, 'wx', mode),
+  readFile: async (file) => new Uint8Array(await readFile(file)),
   readlink,
   rename,
   rm,
@@ -59,6 +61,12 @@ export interface IDurableWriteOptions {
    */
   readonly followSymlinks: boolean;
   /**
+   * For `replace`: the bytes the file must still hold just before it is replaced.
+   * If it holds anything else, or is gone, nothing is replaced, and the write
+   * fails with the code {@link CHANGED}.
+   */
+  readonly ifUnchanged?: Uint8Array;
+  /**
    * `create`: refuse with EEXIST if anything is at the path, even a symlink to a
    * missing file, unless `followSymlinks`. `createInPlace`: the same, but written
    * directly under its name with no temporary: a crash during the write can leave
@@ -67,6 +75,9 @@ export interface IDurableWriteOptions {
    */
   readonly publish: 'create' | 'createInPlace' | 'replace';
 }
+
+/** The error code of a `replace` whose target no longer holds `ifUnchanged`. */
+export const CHANGED = 'ECHANGED';
 
 /** Codes from `link` on a filesystem without hard links. */
 const NO_HARD_LINKS = new Set(['ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM']);
@@ -116,8 +127,9 @@ async function resolveSymlinks(fs: IDurableFileSystem, file: string): Promise<st
  * its final mode is to be set, so it is never readable more widely on the way.
  * It is written and fsynced, then published: `create` links it in place, which
  * is atomic and refuses an existing name as an exclusive create does; `replace`
- * renames it over the old file. Then the directory is fsynced, where the
- * platform allows. The temporary is removed whatever happens.
+ * renames it over the old file, after checking, with `ifUnchanged`, that the old
+ * file is still the one the caller started from. Then the directory is fsynced,
+ * where the platform allows. The temporary is removed whatever happens.
  *
  * Where the filesystem has no hard links, `create` falls back to an exclusive
  * create of the name itself, and removes it again if a step after the create
@@ -159,6 +171,9 @@ export async function writeFileDurably(
       await fs.chmod(temporary, mode);
     }
     if (options.publish === 'replace') {
+      if (options.ifUnchanged !== undefined && !(await holds(fs, target, options.ifUnchanged))) {
+        throw fsError(CHANGED, 'file changed since it was read', target);
+      }
       await fs.rename(temporary, target);
     } else {
       await publishNew(fs, temporary, target, data, mode);
@@ -168,6 +183,16 @@ export async function writeFileDurably(
     await fs.rm(temporary, { force: true }).catch(() => undefined);
   }
   await fs.syncDirectory(directory).catch(() => undefined);
+}
+
+async function holds(fs: IDurableFileSystem, file: string, expected: Uint8Array): Promise<boolean> {
+  const actual = await fs.readFile(file).catch((error: unknown) => {
+    if (errorCode(error) === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  });
+  return actual !== null && actual.length === expected.length && actual.every((byte, i) => byte === expected[i]);
 }
 
 async function publishNew(

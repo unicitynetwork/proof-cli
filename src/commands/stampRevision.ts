@@ -9,9 +9,10 @@ import { CertifiedTransferTransaction } from '@unicitylabs/state-transition-sdk/
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
+import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/TypedArrayUtils.js';
 
 import { ICommandContext } from './context.js';
-import { IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from './durableFile.js';
+import { CHANGED, IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from './durableFile.js';
 import {
   findJournals,
   hasErrorCode,
@@ -24,6 +25,7 @@ import {
   writeJournal,
 } from './revisionJournal.js';
 import { decodeToken, tokenBytesFromInput } from './tokenInput.js';
+import { acquireAppendLock } from './tokenLock.js';
 import { IStampRevisionConfig, IStampRevisionFlags, resolveStampRevisionConfig } from '../config.js';
 import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED, usageError } from '../errors.js';
 import { errorMessage, StampError } from '../lib/errors.js';
@@ -39,9 +41,11 @@ import {
   recoverRevision,
   SuccessorLookup,
 } from '../lib/LineageClient.js';
+import { verifyLineage } from '../lib/LineageVerification.js';
 import { networkNameForId } from '../lib/networks.js';
 import { ICertifyOptions } from '../lib/TimestampClient.js';
 import {
+  alreadyHeldNote,
   existingLineageNote,
   networkLabel,
   PendingRevisionContext,
@@ -86,6 +90,12 @@ async function tokenFileInTheWay(tokenFile: string, cause: unknown): Promise<Err
   );
 }
 
+/** Where a token goes: a new lineage's file, or over the token file this run started from. */
+export type RevisionTarget =
+  | { readonly force: boolean; readonly kind: 'new' }
+  /** `base`: the token file's bytes as this run read them. */
+  | { readonly base: Uint8Array; readonly kind: 'append' };
+
 /**
  * Persist a lineage token whose newest revision has already been certified, with
  * {@link writeFileDurably}: the token file never holds a partial token, a
@@ -96,39 +106,83 @@ async function tokenFileInTheWay(tokenFile: string, cause: unknown): Promise<Err
  *
  * A new lineage is linked into place, so a file that appeared since the checks is
  * never clobbered, nor a symlink to a missing file written through, unless
- * `--force`, which replaces the one and writes through the other. Whatever goes
- * wrong, the full token is printed as hex before the error propagates.
+ * `--force`, which replaces the one and writes through the other. An append
+ * replaces the file only if it still holds `base`; otherwise it is left alone, and
+ * the caller decides what that means. Whatever else goes wrong, the full token is
+ * printed as hex before the error propagates.
  *
  * @param {string} tokenFile Absolute token file path.
  * @param {Uint8Array} bytes Encoded token.
- * @param {boolean} created Whether this is a new lineage.
+ * @param {RevisionTarget} target A new lineage, or an append and the file it started from.
  * @param {ICommandContext} context Streams.
- * @param {boolean} [force] For a new lineage, overwrite whatever is at the path, or write through a symlink.
  * @param {IDurableFileSystem} [fs] File operations, for tests.
+ * @returns {Promise<'changed'|'written'>} `changed` when an append found the file no longer holding `base`.
  */
 export async function writeRevisionToken(
   tokenFile: string,
   bytes: Uint8Array,
-  created: boolean,
+  target: RevisionTarget,
   context: ICommandContext,
-  force = false,
   fs: IDurableFileSystem = NODE_FILE_SYSTEM,
-): Promise<void> {
-  const exclusive = created && !force;
+): Promise<'changed' | 'written'> {
+  const exclusive = target.kind === 'new' && !target.force;
   try {
     await writeFileDurably(
       tokenFile,
       bytes,
-      { followSymlinks: !exclusive, publish: exclusive ? 'create' : 'replace' },
+      {
+        followSymlinks: !exclusive,
+        ifUnchanged: target.kind === 'append' ? target.base : undefined,
+        publish: exclusive ? 'create' : 'replace',
+      },
       fs,
     );
+    return 'written';
   } catch (error) {
+    if (target.kind === 'append' && hasErrorCode(error, CHANGED)) {
+      return 'changed';
+    }
     // First, before anything awaited, so nothing can get between the error and the recovered bytes.
     context.stderr.write(revisionRecoveryLines(bytes));
     if (exclusive && hasErrorCode(error, 'EEXIST')) {
       throw await tokenFileInTheWay(tokenFile, error);
     }
     throw error;
+  }
+}
+
+/**
+ * Whether the token file, as it is now, already holds the last revision of
+ * `token`: the same lineage, verified, with the same transfer at that index (by
+ * its hash, since the two copies may carry proofs under different roots). Each
+ * state has only one certified successor, so a valid file that has moved past
+ * this revision holds it.
+ *
+ * @param {string} tokenFile Token file path.
+ * @param {Token} token This run's token.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @returns {Promise<boolean>} True if nothing would be lost by leaving the file as it is.
+ */
+async function fileHoldsRevision(tokenFile: string, token: Token, trustBase: RootTrustBase): Promise<boolean> {
+  try {
+    const decoded = await decodeToken(tokenBytesFromInput(await NODE_FILE_SYSTEM.readFile(tokenFile)));
+    const current = decoded.token;
+    const index = token.transactions.length - 1;
+    if (
+      current === null ||
+      index < 0 ||
+      !areUint8ArraysEqual(current.id.bytes, token.id.bytes) ||
+      current.transactions.length <= index ||
+      // The same transfer: its proof may differ, served under a later root, but not what it certifies.
+      !(await current.transactions[index].calculateTransactionHash()).equals(
+        await token.transactions[index].calculateTransactionHash(),
+      )
+    ) {
+      return false;
+    }
+    return (await verifyLineage(current, trustBase)).status === 'OK';
+  } catch {
+    return false;
   }
 }
 
@@ -228,6 +282,28 @@ async function appendJournaled(
   // Before any journal is acted on, in either direction.
   await assertValidLineage(token, trustBase);
 
+  // Write the token over the file this run started from. If the file changed meanwhile,
+  // leave it: when it already holds this run's revision, nothing is lost, and the run
+  // goes on as if it had written it; otherwise this run's token goes to stderr as hex,
+  // its journals stay, and it stops.
+  const base = config.tokenBytes as Uint8Array;
+  const persist = async (result: Token): Promise<void> => {
+    const bytes = result.toCBOR();
+    if ((await writeRevisionToken(config.tokenFile, bytes, { base, kind: 'append' }, context)) === 'written') {
+      return;
+    }
+    if (await fileHoldsRevision(config.tokenFile, result, trustBase)) {
+      context.stderr.write(alreadyHeldNote(config.tokenFile, BigInt(result.transactions.length)));
+      return;
+    }
+    context.stderr.write(revisionRecoveryLines(bytes));
+    throw usageError(
+      `${config.tokenFile} changed while this run was working, so it was not replaced. This run's token is ` +
+        'printed above as hex, and its journal is kept, so running stamp-revision again on the current token ' +
+        'file can recover the revision if it belongs there.',
+    );
+  };
+
   // Every journal still kept for the next revision, this run's own included once written.
   const kept = new Map<string, IJournalEntry>();
   const removeKept = async (): Promise<void> => {
@@ -241,7 +317,7 @@ async function appendJournaled(
   // revision removed; then either it was the revision asked for, or the request
   // cannot go ahead.
   const settle = async (entry: IJournalEntry, recovered: Token): Promise<IAppendOutcome> => {
-    await writeRevisionToken(config.tokenFile, recovered.toCBOR(), false, context);
+    await persist(recovered);
     await removeJournal(entry.file);
     await removeKept();
     if (await isSameRevision(entry.transaction, entry.pending.revision, config.digest, config.recipientKey)) {
@@ -339,7 +415,7 @@ async function appendJournaled(
     throw error;
   }
 
-  await writeRevisionToken(config.tokenFile, appended.toCBOR(), false, context);
+  await persist(appended);
   await removeJournal(journalFile);
   await removeKept();
   return { recovered: replayed, signer: new SigningService(config.privateKey).publicKey, token: appended };
@@ -477,7 +553,7 @@ export async function stampRevisionWith(
     if (recovered) {
       await assertNotSuperseded(client, trustBase, token, context);
     }
-    await writeRevisionToken(config.tokenFile, token.toCBOR(), true, context, config.force);
+    await writeRevisionToken(config.tokenFile, token.toCBOR(), { force: config.force, kind: 'new' }, context);
     if (recovered) {
       // Not subject to --quiet: without it, two files can pass for two lineages.
       context.stderr.write(existingLineageNote(token.id.bytes));
@@ -501,7 +577,19 @@ export async function stampRevisionWith(
     if (mismatch !== null) {
       throw mismatch;
     }
-    ({ recovered, signer, token } = await appendJournaled(config, client, context, options, decoded.token));
+    const release = await acquireAppendLock(config.tokenFile);
+    try {
+      // Under the lock: a run that finished between this run's read and its lock moved the file on.
+      const current = await NODE_FILE_SYSTEM.readFile(config.tokenFile).catch(() => null);
+      if (current === null || !areUint8ArraysEqual(current, config.tokenBytes)) {
+        throw usageError(
+          `${config.tokenFile} changed since this run read it, so nothing was submitted. Run the command again.`,
+        );
+      }
+      ({ recovered, signer, token } = await appendJournaled(config, client, context, options, decoded.token));
+    } finally {
+      await release();
+    }
   }
 
   const latest = latestCertified(token);

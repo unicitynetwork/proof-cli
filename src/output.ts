@@ -537,6 +537,18 @@ export function recoveredRevisionLine(revision: bigint, journalFile: string): st
   return `Recovered revision ${revision} from the journal ${journalFile} of an interrupted run.\n`;
 }
 
+/**
+ * @param {string} tokenFile The token file.
+ * @param {bigint} revisions How many revisions this run's token has.
+ * @returns {string} Note for stderr that another run wrote this run's revision, and more.
+ */
+export function alreadyHeldNote(tokenFile: string, revisions: bigint): string {
+  return (
+    `${tokenFile} changed while this run was working, and already holds revision ${revisions}: ` +
+    'another run wrote it. The file was left as it is.\n'
+  );
+}
+
 const SEPARATE_LINEAGE_HINT =
   'To start a separate lineage from the same document, name a different first producer ' +
   '(or sign with a different issuer key).';

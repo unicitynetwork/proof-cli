@@ -256,6 +256,22 @@ describe('writeFileDurably', () => {
       expect(await readdir(directory)).toEqual(['doc.lineage']);
     });
 
+    it('replaces the file only while it still holds what the caller started from', async () => {
+      await writeFile(file, 'old');
+      const old = new TextEncoder().encode('old');
+      await writeFile(file, 'newer, by someone else');
+      await expect(writeFileDurably(file, DATA, { ...replace, ifUnchanged: old })).rejects.toMatchObject({
+        code: 'ECHANGED',
+        path: file,
+      });
+      expect(await readFile(file, 'utf8')).toEqual('newer, by someone else');
+      expect(await readdir(directory)).toEqual(['doc.lineage']);
+
+      await writeFile(file, 'old');
+      await writeFileDurably(file, DATA, { ...replace, ifUnchanged: old });
+      expect(new Uint8Array(await readFile(file))).toEqual(DATA);
+    });
+
     it("keeps the file's mode", async () => {
       await writeFile(file, 'old');
       await chmod(file, 0o640);

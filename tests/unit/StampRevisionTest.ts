@@ -123,6 +123,48 @@ class QueueingClient implements IAggregatorClient {
   }
 }
 
+/**
+ * Holds a run at its first submission or its first proof lookup until released,
+ * so another run, or a test, can act on the token file meanwhile.
+ */
+class GatedClient implements IAggregatorClient {
+  public readonly reached: Promise<void>;
+  private arrive!: () => void;
+  private readonly gate: Promise<void>;
+  private held = false;
+  private open!: () => void;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly at: 'lookup' | 'submit',
+  ) {
+    this.reached = new Promise((resolve) => (this.arrive = resolve));
+    this.gate = new Promise((resolve) => (this.open = resolve));
+  }
+
+  public async getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    await this.hold('lookup');
+    return this.inner.getInclusionProof(stateId);
+  }
+
+  public release(): void {
+    this.open();
+  }
+
+  public async submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
+    await this.hold('submit');
+    return this.inner.submitCertificationRequest(certificationData);
+  }
+
+  private async hold(step: 'lookup' | 'submit'): Promise<void> {
+    if (step === this.at && !this.held) {
+      this.held = true;
+      this.arrive();
+      await this.gate;
+    }
+  }
+}
+
 type Lookup = (stateId: StateId) => Promise<InclusionProofResponse>;
 
 /** Answers the n-th proof lookup with the n-th scripted answer, and the rest from the aggregator. */
@@ -234,6 +276,8 @@ describe('stampRevisionWith', () => {
 
     const text = testContext();
     const finalBytes = new Uint8Array(await readFile(tokenFile));
+    // Back to the copy from before the seal, as if the sealed file had never been written.
+    await writeFile(tokenFile, tokenBytes);
     expect(
       await stampRevisionWith(
         config({ digest: OTHER_DIGEST, privateKey: bob, recipientKey: null, tokenBytes }),
@@ -245,6 +289,7 @@ describe('stampRevisionWith', () => {
     expect(text.stdout()).toContain('Revision       1  (recovered)  (final)\n');
     expect(text.stdout()).toContain('Next producer  none; the lineage is finalized');
 
+    expect(new Uint8Array(await readFile(tokenFile))).toEqual(finalBytes);
     const attempt = stampRevisionWith(
       config({ privateKey: bob, tokenBytes: finalBytes }),
       client,
@@ -264,6 +309,7 @@ describe('stampRevisionWith', () => {
     const tokenFile = path.join(directory, 'doc.lineage');
     await stampRevisionWith(config({}), client, testContext().context);
     const hex = HexConverter.encode(new Uint8Array(await readFile(tokenFile)));
+    await writeFile(tokenFile, `${hex}\n`);
     await expect(
       stampRevisionWith(
         config({ privateKey: bob, tokenBytes: new TextEncoder().encode(`${hex}\n`) }),
@@ -599,6 +645,112 @@ describe('stampRevisionWith', () => {
       expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(3);
       expect(await journalFiles()).toHaveLength(1);
       expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
+    });
+
+    // MastaP on PR #16: a slower run wrote its token over a file another run had moved
+    // on, and a revision certified and written in between vanished from it.
+    describe('concurrent runs', () => {
+      const lockFile = (): string => path.join(directory, '.doc.lineage.lock');
+
+      it('refuses a second append while one holds the lock, and the first completes', async () => {
+        const gated = new GatedClient(aggregator, 'submit');
+        const slow = stampRevisionWith(
+          append({ quiet: true }),
+          new StateTransitionClient(gated),
+          testContext().context,
+        );
+        await gated.reached;
+        expect(JSON.parse(await readFile(lockFile(), 'utf8'))).toMatchObject({
+          format: 'unicity-proof/append-lock',
+          pid: process.pid,
+        });
+
+        const second = stampRevisionWith(append({ quiet: true }), client, testContext().context);
+        await expect(second).rejects.toThrow(
+          new RegExp(
+            `^Another stamp-revision run is appending to ${tokenFile} \\(pid ${process.pid} on .*\\); ` +
+              'nothing was submitted\\. .*delete the lock file .*\\.doc\\.lineage\\.lock: it holds no data\\.$',
+          ),
+        );
+        expect(toExitCode(await second.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+        expect(await journalFiles()).toHaveLength(1);
+
+        gated.release();
+        expect(await slow).toBe(0);
+        expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
+        expect(await readdir(directory)).toEqual(['doc.lineage']);
+      });
+
+      it('refuses, before submitting, a token file that changed since the run read it', async () => {
+        await stampRevisionWith(append({ quiet: true }), client, testContext().context);
+        const attempt = stampRevisionWith(append({ quiet: true }), client, testContext().context);
+        await expect(attempt).rejects.toThrow(`${tokenFile} changed since this run read it, so nothing was submitted.`);
+        expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+        expect(await readdir(directory)).toEqual(['doc.lineage']);
+      });
+
+      /** Revisions 0–2, written by a writer that ignores the lock: bob's revision 1 as `append()` makes it, then 2. */
+      async function movedOn(): Promise<Uint8Array> {
+        const genesis = await Token.fromCBOR(genesisBytes);
+        const fast = { timeoutMs: 2_000 };
+        const first = await appendRevision(client, aggregator.rootTrustBase, genesis, OTHER_DIGEST, bob, testKey, fast);
+        const second = await appendRevision(
+          client,
+          aggregator.rootTrustBase,
+          first,
+          TEST_DIGEST,
+          TEST_PRIVATE_KEY,
+          bobPublic,
+          fast,
+        );
+        return second.toCBOR();
+      }
+      const testKey = HexConverter.decode(TEST_PUBLIC_KEY_HEX);
+
+      it("leaves a file that moved on alone when it already holds this run's revision", async () => {
+        const gated = new GatedClient(aggregator, 'submit');
+        const sink = testContext();
+        const slow = stampRevisionWith(append({ quiet: true }), new StateTransitionClient(gated), sink.context);
+        await gated.reached;
+        const newer = await movedOn();
+        await writeFile(tokenFile, newer);
+
+        gated.release();
+        expect(await slow).toBe(0);
+        expect(sink.stderr()).toEqual(
+          `${tokenFile} changed while this run was working, and already holds revision 1: another run wrote it. ` +
+            'The file was left as it is.\n',
+        );
+        expect(new Uint8Array(await readFile(tokenFile))).toEqual(newer);
+        expect(await readdir(directory)).toEqual(['doc.lineage']);
+      });
+
+      it.each([
+        ['its own append', 'submit'],
+        ['a revision recovered from a journal', 'lookup'],
+      ] as const)(
+        'never replaces a file that changed into something else, writing %s; prints the token and keeps the journal',
+        async (_, at) => {
+          if (at === 'lookup') {
+            await interrupted();
+          }
+          const gated = new GatedClient(aggregator, at);
+          const sink = testContext();
+          const slow = stampRevisionWith(append({ quiet: true }), new StateTransitionClient(gated), sink.context);
+          await gated.reached;
+          await writeFile(tokenFile, 'replaced by hand');
+
+          gated.release();
+          await expect(slow).rejects.toThrow(
+            `${tokenFile} changed while this run was working, so it was not replaced.`,
+          );
+          expect(toExitCode(await slow.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+          expect(sink.stderr()).toContain('the revision was certified');
+          expect(await readFile(tokenFile, 'utf8')).toEqual('replaced by hand');
+          expect(await journalFiles()).toHaveLength(1);
+          expect(await readdir(directory)).not.toContain('.doc.lineage.lock');
+        },
+      );
     });
 
     it('drops a journal whose revision the token file already holds', async () => {
