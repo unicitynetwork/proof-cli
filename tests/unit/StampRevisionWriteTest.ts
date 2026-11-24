@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 
-import { NODE_FILE_SYSTEM } from '../../src/commands/durableFile.js';
+import { IDurableFileSystem, IWritableFile, NODE_FILE_SYSTEM } from '../../src/commands/durableFile.js';
 import { writeRevisionToken } from '../../src/commands/stampRevision.js';
 import { testContext } from '../support/context.js';
 import { tempDir } from '../support/fixtures.js';
@@ -67,11 +67,18 @@ describe('writeRevisionToken', () => {
     if (!created) {
       await writeFile(out, 'old');
     }
-    const failing = {
+    const failing: IDurableFileSystem = {
       ...NODE_FILE_SYSTEM,
-      writeNew: async (file: string, data: Uint8Array, mode: number): Promise<void> => {
-        await NODE_FILE_SYSTEM.writeNew(file, data.subarray(0, 2), mode);
-        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      openNew: async (file, mode): Promise<IWritableFile> => {
+        const handle = await NODE_FILE_SYSTEM.openNew(file, mode);
+        return {
+          close: (): Promise<void> => handle.close(),
+          sync: (): Promise<void> => handle.sync(),
+          writeFile: async (data): Promise<void> => {
+            await handle.writeFile(data.subarray(0, 2));
+            throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+          },
+        };
       },
     };
     const sink = testContext();

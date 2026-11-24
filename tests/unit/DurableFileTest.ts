@@ -1,7 +1,12 @@
 import { chmod, lstat, readdir, readFile, readlink, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from '../../src/commands/durableFile.js';
+import {
+  IDurableFileSystem,
+  IWritableFile,
+  NODE_FILE_SYSTEM,
+  writeFileDurably,
+} from '../../src/commands/durableFile.js';
 import { tempDir } from '../support/fixtures.js';
 
 const DATA = new TextEncoder().encode('new contents\n');
@@ -10,17 +15,52 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
 }
 
-/** The real file system, with `writeNew` writing only the first three bytes of `fail` before failing. */
-function failingWrite(fail: (file: string) => boolean): IDurableFileSystem {
+type Step = 'close' | 'sync' | 'writeFile';
+
+/**
+ * The real file system, with the file `fail` picks failing at `step` after it
+ * was created: `writeFile` writes only the first three bytes before failing.
+ */
+function failingWrite(fail: (file: string) => boolean, step: Step = 'writeFile'): IDurableFileSystem {
   return {
     ...NODE_FILE_SYSTEM,
-    writeNew: async (file, data, mode): Promise<void> => {
+    openNew: async (file, mode): Promise<IWritableFile> => {
+      const handle = await NODE_FILE_SYSTEM.openNew(file, mode);
       if (!fail(file)) {
-        return NODE_FILE_SYSTEM.writeNew(file, data, mode);
+        return handle;
       }
-      await NODE_FILE_SYSTEM.writeNew(file, data.subarray(0, 3), mode);
-      throw errno('ENOSPC');
+      const failure = errno(step === 'writeFile' ? 'ENOSPC' : 'EIO');
+      async function close(): Promise<void> {
+        await handle.close();
+        if (step === 'close') {
+          throw failure;
+        }
+      }
+      async function sync(): Promise<void> {
+        if (step === 'sync') {
+          throw failure;
+        }
+        await handle.sync();
+      }
+      async function write(data: Uint8Array): Promise<void> {
+        if (step !== 'writeFile') {
+          await handle.writeFile(data);
+          return;
+        }
+        await handle.writeFile(data.subarray(0, 3));
+        throw failure;
+      }
+      return { close, sync, writeFile: write };
     },
+  };
+}
+
+/** The real file system, with creating the file `fail` picks failing at the open itself, with `code`. */
+function failingOpen(fail: (file: string) => boolean, code: string): IDurableFileSystem {
+  return {
+    ...NODE_FILE_SYSTEM,
+    openNew: (file, mode): Promise<IWritableFile> =>
+      fail(file) ? Promise.reject(errno(code)) : NODE_FILE_SYSTEM.openNew(file, mode),
   };
 }
 
@@ -113,9 +153,9 @@ describe('writeFileDurably', () => {
       const recording: IDurableFileSystem = {
         ...NODE_FILE_SYSTEM,
         link: noLink,
-        writeNew: (name, data, mode) => {
+        openNew: (name, mode) => {
           created.push(name);
-          return NODE_FILE_SYSTEM.writeNew(name, data, mode);
+          return NODE_FILE_SYSTEM.openNew(name, mode);
         },
       };
       await writeFileDurably(file, DATA, inPlace, recording);
@@ -145,6 +185,55 @@ describe('writeFileDurably', () => {
         code: 'ENOSPC',
       });
       expect((await readdir(directory)).sort()).toEqual(['doc.lineage', 'link']);
+    });
+  });
+
+  // MastaP on PR #16: a failed open is not proof the name was free. Linux allocates the
+  // descriptor before it looks up the path, so EMFILE comes back even when the file exists.
+  describe('a create that fails at the open', () => {
+    it.each(['EMFILE', 'ENFILE', 'ENOMEM'])('never removes an existing file, written in place (%s)', async (code) => {
+      await writeFile(file, 'existing key\n', { mode: 0o600 });
+      await expect(
+        writeFileDurably(
+          file,
+          DATA,
+          { fileMode: 0o600, followSymlinks: false, publish: 'createInPlace' },
+          failingOpen(() => true, code),
+        ),
+      ).rejects.toMatchObject({ code });
+      expect(await readFile(file, 'utf8')).toEqual('existing key\n');
+    });
+
+    it('never removes an existing file on the no-hard-link fallback either', async () => {
+      await writeFile(file, 'existing token');
+      const fs = { ...failingOpen((name) => name === file, 'EMFILE'), link: noLink };
+      await expect(
+        writeFileDurably(file, DATA, { followSymlinks: false, publish: 'create' }, fs),
+      ).rejects.toMatchObject({ code: 'EMFILE' });
+      expect(await readFile(file, 'utf8')).toEqual('existing token');
+      expect(await readdir(directory)).toEqual(['doc.lineage']);
+    });
+  });
+
+  describe('a create that fails after the open', () => {
+    const inPlace = { fileMode: 0o600, followSymlinks: false, publish: 'createInPlace' } as const;
+
+    it.each<Step>(['writeFile', 'sync', 'close'])('removes the file it created (%s fails)', async (step) => {
+      await expect(
+        writeFileDurably(
+          file,
+          DATA,
+          inPlace,
+          failingWrite(() => true, step),
+        ),
+      ).rejects.toHaveProperty('code');
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    it('removes the file it created when setting its mode fails', async () => {
+      const fs = { ...NODE_FILE_SYSTEM, chmod: (): Promise<void> => Promise.reject(errno('EPERM')) };
+      await expect(writeFileDurably(file, DATA, inPlace, fs)).rejects.toMatchObject({ code: 'EPERM' });
+      expect(await readdir(directory)).toEqual([]);
     });
   });
 

@@ -2,28 +2,37 @@ import { randomBytes } from 'node:crypto';
 import { chmod, link, lstat, open, readlink, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+/** A file just created by {@link IDurableFileSystem.openNew}. */
+export interface IWritableFile {
+  close(): Promise<void>;
+  sync(): Promise<void>;
+  writeFile(data: Uint8Array): Promise<void>;
+}
+
 /**
  * The file operations {@link writeFileDurably} needs, so tests can make one fail
- * partway. Each is the plain `node:fs/promises` call, except `writeNew`.
+ * partway. Each is the plain `node:fs/promises` call. Deciding what a failure
+ * leaves behind is not their job: that stays in this module, where it is tested.
  */
 export interface IDurableFileSystem {
   chmod(file: string, mode: number): Promise<void>;
   link(existing: string, file: string): Promise<void>;
   lstat(file: string): Promise<{ isSymbolicLink(): boolean }>;
+  /** Create `file` exclusively (`wx`) with `mode`, subject to the umask, and open it for writing. */
+  openNew(file: string, mode: number): Promise<IWritableFile>;
   readlink(file: string): Promise<string>;
   rename(from: string, to: string): Promise<void>;
   rm(file: string, options: { force: boolean }): Promise<void>;
   stat(file: string): Promise<{ mode: number }>;
   /** Flush a directory's entries; may fail where directories cannot be opened. */
   syncDirectory(directory: string): Promise<void>;
-  /** Create `file` exclusively with `mode` (subject to the umask), write `data`, fsync, close. */
-  writeNew(file: string, data: Uint8Array, mode: number): Promise<void>;
 }
 
 export const NODE_FILE_SYSTEM: IDurableFileSystem = {
   chmod,
   link,
   lstat,
+  openNew: (file, mode) => open(file, 'wx', mode),
   readlink,
   rename,
   rm,
@@ -31,15 +40,6 @@ export const NODE_FILE_SYSTEM: IDurableFileSystem = {
   syncDirectory: async (directory) => {
     const handle = await open(directory, 'r');
     try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  },
-  writeNew: async (file, data, mode) => {
-    const handle = await open(file, 'wx', mode);
-    try {
-      await handle.writeFile(data);
       await handle.sync();
     } finally {
       await handle.close();
@@ -120,7 +120,8 @@ async function resolveSymlinks(fs: IDurableFileSystem, file: string): Promise<st
  * platform allows. The temporary is removed whatever happens.
  *
  * Where the filesystem has no hard links, `create` falls back to an exclusive
- * create of the name itself, and removes it again if the write fails. Only a
+ * create of the name itself, and removes it again if a step after the create
+ * fails; a failed create removes nothing. Only a
  * crash during that write can then leave a partial file. `createInPlace` always
  * works that way, for data of which a stray second copy would be worse than a
  * partial file.
@@ -153,7 +154,7 @@ export async function writeFileDurably(
   }
   const temporary = path.join(directory, `.${path.basename(target)}.${randomBytes(8).toString('hex')}`);
   try {
-    await fs.writeNew(temporary, data, mode === undefined ? 0o666 : 0o600);
+    await writeExclusive(fs, temporary, data, mode === undefined ? 0o666 : 0o600);
     if (mode !== undefined) {
       await fs.chmod(temporary, mode);
     }
@@ -192,8 +193,52 @@ async function publishNew(
 }
 
 /**
- * An exclusive create of the name itself, written, fsynced and set to `mode`;
- * removed again if anything after the create fails.
+ * Create `file` exclusively, write `data`, fsync and close it. If anything after
+ * the create fails, the file is removed again: this call made it. If the create
+ * itself fails, nothing is removed, whatever the error. A failed open does not
+ * mean the name was free: Linux allocates the descriptor before it looks up the
+ * path, so EMFILE, ENFILE or ENOMEM come back even when the file exists, and it
+ * may be someone's private key.
+ *
+ * @param {IDurableFileSystem} fs File operations.
+ * @param {string} file Path to create.
+ * @param {Uint8Array} data Contents.
+ * @param {number} mode Mode to create it with, subject to the umask.
+ * @throws {NodeJS.ErrnoException} EEXIST, carrying `file` as its path, when the name is taken.
+ */
+async function writeExclusive(fs: IDurableFileSystem, file: string, data: Uint8Array, mode: number): Promise<void> {
+  let handle: IWritableFile;
+  try {
+    handle = await fs.openNew(file, mode);
+  } catch (error) {
+    if (errorCode(error) === 'EEXIST') {
+      throw fsError('EEXIST', 'file already exists', file, error);
+    }
+    throw error;
+  }
+  let failure: { error: unknown } | null = null;
+  try {
+    await handle.writeFile(data);
+    await handle.sync();
+  } catch (error) {
+    failure = { error };
+  }
+  try {
+    await handle.close();
+  } catch (error) {
+    failure ??= { error };
+  }
+  if (failure !== null) {
+    // Best effort, and never allowed to replace the error that actually matters.
+    await fs.rm(file, { force: true }).catch(() => undefined);
+    throw failure.error;
+  }
+}
+
+/**
+ * An exclusive create of the name itself, written, fsynced and set to `mode`. A
+ * file this call created is removed again if a later step fails; nothing else is
+ * ever removed.
  *
  * @param {IDurableFileSystem} fs File operations.
  * @param {string} target Path to create.
@@ -206,17 +251,14 @@ async function createInPlace(
   data: Uint8Array,
   mode: number | undefined,
 ): Promise<void> {
+  await writeExclusive(fs, target, data, mode === undefined ? 0o666 : 0o600);
+  if (mode === undefined) {
+    return;
+  }
   try {
-    await fs.writeNew(target, data, mode === undefined ? 0o666 : 0o600);
-    if (mode !== undefined) {
-      await fs.chmod(target, mode);
-    }
+    await fs.chmod(target, mode);
   } catch (error) {
-    if (errorCode(error) === 'EEXIST') {
-      throw fsError('EEXIST', 'file already exists', target, error);
-    }
-    // Any other failure came after the exclusive create, or found nothing to remove:
-    // the name is this run's, and must not be left holding a partial file.
+    // The create succeeded, so the file is this call's.
     await fs.rm(target, { force: true }).catch(() => undefined);
     throw error;
   }
