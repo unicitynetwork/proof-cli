@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
@@ -16,9 +16,11 @@ import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.j
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
 import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 
+import { pendingRevision, writeJournal } from '../../src/commands/revisionJournal.js';
 import { networkMismatch, stampRevisionWith } from '../../src/commands/stampRevision.js';
 import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
+import { StampError } from '../../src/lib/errors.js';
 import { appendRevision, prepareRevision } from '../../src/lib/LineageClient.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
 import { bundledTrustBase } from '../../src/lib/networks.js';
@@ -162,6 +164,47 @@ class GatedClient implements IAggregatorClient {
       this.arrive();
       await this.gate;
     }
+  }
+}
+
+/** Refuses every request outright with a status the SDK knows, so the run gets a StampError. */
+class RefusingClient implements IAggregatorClient {
+  public constructor(private readonly inner: TestAggregatorClient) {}
+
+  public getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    return this.inner.getInclusionProof(stateId);
+  }
+
+  public submitCertificationRequest(): Promise<CertificationResponse> {
+    return Promise.resolve(CertificationResponse.create(CertificationStatus.REQUEST_EXPIRED));
+  }
+}
+
+/**
+ * Lets another transfer take the slot first: on the run's submission it certifies
+ * `rival` directly, then passes the run's request on, which the aggregator answers
+ * with STATE_ID_EXISTS. Lookups pass through until `goodLookups` have been answered;
+ * every one after that fails, as a gateway dropping requests would.
+ */
+class RacingClient implements IAggregatorClient {
+  private lookups = 0;
+
+  public constructor(
+    private readonly inner: TestAggregatorClient,
+    private readonly rival: CertificationData,
+    private readonly goodLookups: number,
+  ) {}
+
+  public getInclusionProof(stateId: StateId): Promise<InclusionProofResponse> {
+    this.lookups += 1;
+    return this.lookups > this.goodLookups
+      ? Promise.reject(new JsonRpcNetworkError(502, 'bad gateway'))
+      : this.inner.getInclusionProof(stateId);
+  }
+
+  public async submitCertificationRequest(certificationData: CertificationData): Promise<CertificationResponse> {
+    await this.inner.submitCertificationRequest(this.rival);
+    return this.inner.submitCertificationRequest(certificationData);
   }
 }
 
@@ -535,6 +578,84 @@ describe('stampRevisionWith', () => {
 
     describe('an earlier run whose outcome is not known yet', () => {
       const UNRESOLVED = 'submitted by an earlier run and not certified yet:';
+
+      /** Run 1: bob's revision 1 (OTHER_DIGEST) is journaled, but its request never reaches the aggregator. */
+      async function lost(): Promise<void> {
+        await expect(
+          stampRevisionWith(
+            append({ quiet: true }),
+            new StateTransitionClient(new LostSubmitClient(aggregator)),
+            testContext().context,
+          ),
+        ).rejects.toThrow(/bad gateway/);
+        expect(await journalFiles()).toHaveLength(1);
+      }
+
+      // MastaP on PR #16: nothing pinned the `created` guard before the removal on a refusal.
+      it("keeps an earlier run's journal for the same transfer when this run's own request is refused", async () => {
+        await lost();
+        const [earlier] = await journalFiles();
+        const attempt = stampRevisionWith(
+          append({ quiet: true }),
+          new StateTransitionClient(new RefusingClient(aggregator)),
+          testContext().context,
+        );
+        await expect(attempt).rejects.toBeInstanceOf(StampError);
+        expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(3);
+        // The earlier request was a separate one, and may still be certified.
+        expect(await journalFiles()).toEqual([earlier]);
+      });
+
+      it('removes its own journal when its request is refused, having created it', async () => {
+        const attempt = stampRevisionWith(
+          append({ quiet: true }),
+          new StateTransitionClient(new RefusingClient(aggregator)),
+          testContext().context,
+        );
+        await expect(attempt).rejects.toBeInstanceOf(StampError);
+        expect(await readdir(directory)).toEqual(['doc.lineage']);
+      });
+
+      // MastaP on PR #16: nothing pinned removeKept() in settle. Journals are tried in
+      // name order, and an uncertified one tried before the certified one is removed by
+      // the ALREADY_CERTIFIED branch first; here it sorts last, so only settle can remove
+      // it. findJournals matches names by pattern only, so a test can choose the order.
+      it('removes every other journal for the revision once one is recovered', async () => {
+        await interrupted();
+        const certified = path.join(directory, '.doc.lineage.0000000000000000.pending');
+        await rename(journal, certified);
+        const genesis = await Token.fromCBOR(genesisBytes);
+        const never = await prepareRevision(genesis, aggregator.rootTrustBase, TEST_DIGEST, bob, null);
+        await writeJournal(
+          path.join(directory, '.doc.lineage.ffffffffffffffff.pending'),
+          pendingRevision(genesis, never, TEST_DIGEST, null),
+        );
+        expect(await journalFiles()).toHaveLength(2);
+
+        expect(await stampRevisionWith(append({ quiet: true }), client, testContext().context)).toBe(0);
+        expect(await readdir(directory)).toEqual(['doc.lineage']);
+        expect(await revisions()).toEqual([TEST_DIGEST_HEX, OTHER_DIGEST_HEX]);
+      });
+
+      // MastaP on PR #16: nothing pinned the tolerant branch of recoverKept. After
+      // ALREADY_CERTIFIED, a failed lookup of a kept journal keeps that journal, and the
+      // run still ends with the outcome it knows, not the network error.
+      it('keeps a journal whose lookup fails after ALREADY_CERTIFIED, and still reports ALREADY_CERTIFIED', async () => {
+        await lost();
+        const [earlier] = await journalFiles();
+        const genesis = await Token.fromCBOR(genesisBytes);
+        const rival = await prepareRevision(genesis, aggregator.rootTrustBase, TEST_DIGEST, bob, null);
+        // Good lookups: run 1's journal at start, then the conflict lookup after STATE_ID_EXISTS.
+        const racing = new StateTransitionClient(new RacingClient(aggregator, rival.certificationData, 2));
+
+        const sink = testContext();
+        const attempt = stampRevisionWith(append({ digest: TEST_DIGEST, quiet: true }), racing, sink.context);
+        await expect(attempt).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+        expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_VERIFICATION_FAILED);
+        expect(sink.stderr()).toContain(UNRESOLVED);
+        expect(sink.stderr()).toContain('as this run submitted it (not certified)');
+        expect(await journalFiles()).toEqual([earlier]);
+      });
 
       /** Run 1: bob's revision 1 (OTHER_DIGEST) is submitted, and the run times out while it is queued. */
       async function timedOut(queueing: QueueingClient): Promise<void> {

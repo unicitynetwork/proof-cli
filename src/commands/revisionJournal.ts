@@ -58,7 +58,9 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * Every journal next to the token file, in name order.
+ * Every journal next to the token file, in name order. A journal is matched by
+ * its name's pattern only; its tag is not checked against its contents, which
+ * are checked against the token file when it is acted on.
  *
  * @param {string} tokenFile Absolute token file path.
  * @returns {Promise<string[]>} Journal paths.
