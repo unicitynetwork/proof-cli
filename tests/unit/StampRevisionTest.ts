@@ -42,6 +42,7 @@ import {
   TEST_PRIVATE_KEY,
   TEST_PUBLIC_KEY_HEX,
 } from '../support/fixtures.js';
+import { StallingClient } from '../support/StallingClient.js';
 import { TestAggregatorClient } from '../support/TestAggregatorClient.js';
 
 /** Passes the request on, then loses every proof lookup: the run fails after certification. */
@@ -583,6 +584,21 @@ describe('stampRevisionWith', () => {
         expect(await journalFiles()).toEqual([]);
         expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
       });
+    });
+
+    it('keeps its journal and exits 3 when the conflict lookup stalls past the timeout', async () => {
+      const genesis = await Token.fromCBOR(genesisBytes);
+      const other = await prepareRevision(genesis, aggregator.rootTrustBase, TEST_DIGEST, bob, null);
+      await aggregator.submitCertificationRequest(other.certificationData);
+      const attempt = stampRevisionWith(
+        append({ quiet: true, timeoutMs: 200 }),
+        new StateTransitionClient(new StallingClient(aggregator, 1, true)),
+        testContext().context,
+      );
+      await expect(attempt).rejects.toBeInstanceOf(SleepError);
+      expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(3);
+      expect(await journalFiles()).toHaveLength(1);
+      expect(new Uint8Array(await readFile(tokenFile))).toEqual(genesisBytes);
     });
 
     it('drops a journal whose revision the token file already holds', async () => {

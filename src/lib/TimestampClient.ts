@@ -130,6 +130,27 @@ export async function findCertifiedProof(
 }
 
 /**
+ * @param {AbortSignal} signal The deadline that fired.
+ * @param {unknown} cause What the cut-off lookup threw.
+ * @returns {SleepError} The error {@link waitInclusionProof} gives for the same abort.
+ */
+function abortedWait(signal: AbortSignal, cause: unknown): SleepError {
+  let message = 'Wait was aborted';
+  try {
+    const reason: unknown = signal.reason;
+    if (reason instanceof Error || (typeof reason === 'object' && reason !== null && 'message' in reason)) {
+      // The SDK prints the reason's own description, e.g. "TimeoutError: The operation was aborted due to timeout".
+      message = `${(reason as Error).name}: ${(reason as Error).message}`;
+    } else if (typeof reason === 'string') {
+      message = reason;
+    }
+  } catch {
+    // A reason that cannot be described still ends the wait.
+  }
+  return new SleepError(message, { cause });
+}
+
+/**
  * Submit a certification request and wait for its inclusion proof.
  *
  * `STATE_ID_EXISTS` means the aggregator already holds a request for this state.
@@ -148,7 +169,8 @@ export async function findCertifiedProof(
  * @returns {Promise<InclusionProof>} Verified inclusion proof.
  * @throws {StampError} If the aggregator returns a known failure status.
  * @throws {StateAlreadyCertifiedError} If the state was certified with another transaction.
- * @throws {SleepError} If the proof does not arrive before the timeout or abort.
+ * @throws {SleepError} If the proof does not arrive before the timeout or abort,
+ *   including while a lookup is in flight.
  */
 export async function certifyTransaction(
   client: StateTransitionClient,
@@ -158,9 +180,28 @@ export async function certifyTransaction(
   options: ICertifyOptions = {},
 ): Promise<InclusionProof> {
   const response = await client.submitCertificationRequest(certificationData, { signal: options.signal });
+  // One deadline from here on, for every lookup as well as the wait: all of them are
+  // getting the proof, which is what the timeout bounds.
+  const signals = [AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)];
+  if (options.signal) {
+    signals.push(options.signal);
+  }
+  const deadline = AbortSignal.any(signals);
+  const lookUp = async (): Promise<InclusionProof | null> => {
+    try {
+      return await findCertifiedProof(client, context, transaction, deadline);
+    } catch (error) {
+      if (!(error instanceof StateAlreadyCertifiedError) && deadline.aborted) {
+        // Cut off by the deadline: the same outcome, and the same error, as a wait that times out.
+        throw abortedWait(deadline, error);
+      }
+      throw error;
+    }
+  };
+
   const exists = response.status === STATE_ID_EXISTS_STATUS;
   if (exists) {
-    const proof = await findCertifiedProof(client, context, transaction, options.signal);
+    const proof = await lookUp();
     if (proof !== null) {
       options.onAlreadyCertified?.();
       return proof;
@@ -174,10 +215,6 @@ export async function certifyTransaction(
     );
   }
 
-  const signals = [AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)];
-  if (options.signal) {
-    signals.push(options.signal);
-  }
   try {
     const proof = await waitInclusionProof(
       client,
@@ -185,7 +222,7 @@ export async function certifyTransaction(
       context.predicateVerifier,
       context.unicityCertificateVerifier,
       transaction,
-      AbortSignal.any(signals),
+      deadline,
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     );
     if (exists) {
@@ -199,7 +236,7 @@ export async function certifyTransaction(
     // SUCCESS to a repeat while the first request for the state waits for its round,
     // then certifies the first and drops the repeat. A timeout found no proof at all.
     if (!(error instanceof SleepError)) {
-      await findCertifiedProof(client, context, transaction, options.signal);
+      await lookUp();
     }
     throw error;
   }

@@ -17,6 +17,7 @@ import { StateMask } from '@unicitylabs/state-transition-sdk/lib/transaction/Sta
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
 import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
+import { SleepError } from '@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js';
 
 import { StateAlreadyCertifiedError } from '../../../src/lib/errors.js';
 import {
@@ -38,6 +39,7 @@ import { createLineageVerificationContext, verifyLineage } from '../../../src/li
 import { bundledTrustBase } from '../../../src/lib/networks.js';
 import { findCertifiedProof, STATE_ID_EXISTS_STATUS, stampWith } from '../../../src/lib/TimestampClient.js';
 import { OTHER_DIGEST, TEST_DIGEST } from '../../support/fixtures.js';
+import { StallingClient } from '../../support/StallingClient.js';
 import { TestAggregatorClient } from '../../support/TestAggregatorClient.js';
 
 /** Counts certification requests so a test can see whether the network was contacted. */
@@ -352,6 +354,33 @@ describe('LineageClient', () => {
     await expect(
       appendRevision(client, trustBase, genesis, OTHER_DIGEST, bob, publicKey(carol), fast),
     ).rejects.toMatchObject({ code: 'ALREADY_CERTIFIED' });
+  });
+
+  // MastaP on PR #16: the conflict lookups must stay inside --timeout. A stalled
+  // lookup ends as a timeout would, with the SDK's SleepError (exit 3).
+  describe('a stalled conflict lookup', () => {
+    async function takenSlot(): Promise<Token> {
+      const genesis = await createLineage(client, trustBase, TEST_DIGEST, alice, publicKey(bob), fast);
+      const other = await prepareRevision(genesis, trustBase, OTHER_DIGEST, bob, publicKey(carol));
+      await aggregator.submitCertificationRequest(other.certificationData);
+      return genesis;
+    }
+
+    it.each([
+      ['after SUCCESS and a proof of another transfer', 1, true],
+      ['after STATE_ID_EXISTS', 0, false],
+    ])('ends within the timeout, as a timeout (%s)', async (_, stallFrom, dropRequests) => {
+      const genesis = await takenSlot();
+      const stalling = new StateTransitionClient(new StallingClient(aggregator, stallFrom, dropRequests));
+      const started = Date.now();
+      const attempt = appendRevision(stalling, trustBase, genesis, THIRD_DIGEST, bob, publicKey(carol), {
+        pollIntervalMs: 10,
+        timeoutMs: 200,
+      });
+      await expect(attempt).rejects.toBeInstanceOf(SleepError);
+      await expect(attempt).rejects.toThrow(/TimeoutError/);
+      expect(Date.now() - started).toBeLessThan(1_500);
+    });
   });
 
   describe('recovering a genesis', () => {
