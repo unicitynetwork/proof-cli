@@ -1,0 +1,640 @@
+import { lstat, stat } from 'node:fs/promises';
+
+import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
+import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
+import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
+import { StateTransitionClient } from '@unicitylabs/state-transition-sdk/lib/StateTransitionClient.js';
+import { CertifiedMintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedMintTransaction.js';
+import { CertifiedTransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/CertifiedTransferTransaction.js';
+import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
+import { HexConverter } from '@unicitylabs/state-transition-sdk/lib/util/HexConverter.js';
+import { areUint8ArraysEqual } from '@unicitylabs/state-transition-sdk/lib/util/TypedArrayUtils.js';
+
+import { ICommandContext } from './context.js';
+import { CHANGED, IDurableFileSystem, NODE_FILE_SYSTEM, writeFileDurably } from './durableFile.js';
+import {
+  findJournals,
+  hasErrorCode,
+  IPendingRevision,
+  journalPath,
+  journalStanding,
+  pendingRevision,
+  readJournal,
+  removeJournal,
+  writeJournal,
+} from './revisionJournal.js';
+import { decodeToken, tokenBytesFromInput } from './tokenInput.js';
+import { acquireAppendLock } from './tokenLock.js';
+import { IStampRevisionConfig, IStampRevisionFlags, resolveStampRevisionConfig } from '../config.js';
+import { CliError, EXIT_OK, EXIT_VERIFICATION_FAILED, usageError } from '../errors.js';
+import { errorMessage, StampError } from '../lib/errors.js';
+import {
+  assertValidLineage,
+  certifyRevision,
+  createOrRecoverLineage,
+  currentProducerKey,
+  findSuccessor,
+  isSameRevision,
+  LineageError,
+  prepareRevision,
+  recoverRevision,
+  SuccessorLookup,
+} from '../lib/LineageClient.js';
+import { verifyLineage } from '../lib/LineageVerification.js';
+import { networkNameForId } from '../lib/networks.js';
+import { ICertifyOptions } from '../lib/TimestampClient.js';
+import {
+  alreadyHeldNote,
+  existingLineageNote,
+  networkLabel,
+  PendingRevisionContext,
+  pendingRevisionLines,
+  recoveredRevisionLine,
+  revisionJson,
+  revisionRecoveryLines,
+  revisionText,
+  supersededLineageMessage,
+  toJsonLine,
+  warningLine,
+} from '../output.js';
+
+/**
+ * Explain an exclusive create of a new lineage's token file that found something
+ * in the way: a file that appeared since the checks, or a symlink to a missing
+ * file (which looked absent to them). The genesis is certified either way, and the
+ * same command recovers it, so say where it can be run again.
+ *
+ * @param {string} tokenFile Absolute token file path.
+ * @param {unknown} cause The EEXIST.
+ * @returns {Promise<Error>} A usage error.
+ */
+async function tokenFileInTheWay(tokenFile: string, cause: unknown): Promise<Error> {
+  const dangling =
+    (await lstat(tokenFile).then(
+      (stats) => stats.isSymbolicLink(),
+      () => false,
+    )) &&
+    (await stat(tokenFile).then(
+      () => false,
+      () => true,
+    ));
+  const certified = 'The new lineage is certified; running the same command again recovers it';
+  return usageError(
+    dangling
+      ? `${tokenFile} is a symlink to a missing file, so the new lineage was not written. ${certified}: ` +
+          'pass --force to create the file the symlink points to, or use another --token-file.'
+      : `${tokenFile} appeared while the new lineage was being certified, and was not overwritten. ${certified} ` +
+          'with another --token-file.',
+    { cause },
+  );
+}
+
+/** Where a token goes: a new lineage's file, or over the token file this run started from. */
+export type RevisionTarget =
+  | { readonly force: boolean; readonly kind: 'new' }
+  /** `base`: the token file's bytes as this run read them. */
+  | { readonly base: Uint8Array; readonly kind: 'append' };
+
+/**
+ * Persist a lineage token whose newest revision has already been certified, with
+ * {@link writeFileDurably}: the token file never holds a partial token, a
+ * replaced one keeps its mode, and once this returns the write survives a power
+ * loss. The file is the only copy of every revision's transaction, so an append
+ * writes through a symlink at the path rather than replacing the symlink: a link
+ * into a shared folder keeps working.
+ *
+ * A new lineage is linked into place, so a file that appeared since the checks is
+ * never clobbered, nor a symlink to a missing file written through, unless
+ * `--force`, which replaces the one and writes through the other. An append
+ * replaces the file only if it still holds `base`; otherwise it is left alone, and
+ * the caller decides what that means. Whatever else goes wrong, the full token is
+ * printed as hex before the error propagates.
+ *
+ * @param {string} tokenFile Absolute token file path.
+ * @param {Uint8Array} bytes Encoded token.
+ * @param {RevisionTarget} target A new lineage, or an append and the file it started from.
+ * @param {ICommandContext} context Streams.
+ * @param {IDurableFileSystem} [fs] File operations, for tests.
+ * @returns {Promise<'changed'|'written'>} `changed` when an append found the file no longer holding `base`.
+ */
+export async function writeRevisionToken(
+  tokenFile: string,
+  bytes: Uint8Array,
+  target: RevisionTarget,
+  context: ICommandContext,
+  fs: IDurableFileSystem = NODE_FILE_SYSTEM,
+): Promise<'changed' | 'written'> {
+  const exclusive = target.kind === 'new' && !target.force;
+  try {
+    await writeFileDurably(
+      tokenFile,
+      bytes,
+      {
+        followSymlinks: !exclusive,
+        ifUnchanged: target.kind === 'append' ? target.base : undefined,
+        publish: exclusive ? 'create' : 'replace',
+      },
+      fs,
+    );
+    return 'written';
+  } catch (error) {
+    if (target.kind === 'append' && hasErrorCode(error, CHANGED)) {
+      return 'changed';
+    }
+    // First, before anything awaited, so nothing can get between the error and the recovered bytes.
+    context.stderr.write(revisionRecoveryLines(bytes));
+    if (exclusive && hasErrorCode(error, 'EEXIST')) {
+      throw await tokenFileInTheWay(tokenFile, error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether the token file, as it is now, already holds the last revision of
+ * `token`: the same lineage, verified, with the same transfer at that index (by
+ * its hash, since the two copies may carry proofs under different roots). Each
+ * state has only one certified successor, so a valid file that has moved past
+ * this revision holds it.
+ *
+ * @param {string} tokenFile Token file path.
+ * @param {Token} token This run's token.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @returns {Promise<boolean>} True if nothing would be lost by leaving the file as it is.
+ */
+async function fileHoldsRevision(tokenFile: string, token: Token, trustBase: RootTrustBase): Promise<boolean> {
+  try {
+    const decoded = await decodeToken(tokenBytesFromInput(await NODE_FILE_SYSTEM.readFile(tokenFile)));
+    const current = decoded.token;
+    const index = token.transactions.length - 1;
+    if (
+      current === null ||
+      index < 0 ||
+      !areUint8ArraysEqual(current.id.bytes, token.id.bytes) ||
+      current.transactions.length <= index ||
+      // A cheap pre-check: once the file verifies, it can only hold this transfer here,
+      // since a valid lineage has one transfer per slot. Compared by hash, because the
+      // copies' proofs may be served under different roots.
+      !(await current.transactions[index].calculateTransactionHash()).equals(
+        await token.transactions[index].calculateTransactionHash(),
+      )
+    ) {
+      return false;
+    }
+    // The check that matters: a corrupted copy of the same lineage does not hold anything,
+    // and leaving it in place would drop this run's valid token without a trace.
+    return (await verifyLineage(current, trustBase)).status === 'OK';
+  } catch {
+    return false;
+  }
+}
+
+function writePending(
+  context: ICommandContext,
+  pending: IPendingRevision,
+  journalFile: string,
+  why: PendingRevisionContext,
+): void {
+  context.stderr.write(pendingRevisionLines({ ...pending, journalFile }, why));
+}
+
+/**
+ * The lineage passes to someone after a recovered revision; say who.
+ *
+ * @param {Token} token Token ending in the recovered revision.
+ * @returns {string} Where the lineage stands now.
+ */
+function standingAfter(token: Token): string {
+  const next = currentProducerKey(token);
+  return next === null ? 'the lineage is now finalized' : `the lineage now passes to ${HexConverter.encode(next)}`;
+}
+
+/**
+ * A revision from an earlier run was recovered, but it is not the one asked for:
+ * the token file now holds it, and the requested revision was not appended.
+ *
+ * @param {bigint} revision Index of the recovered revision.
+ * @param {Token} token Token ending in it.
+ * @param {string} tokenFile Where it was written.
+ * @returns {LineageError} The error to throw.
+ */
+function recoveredOtherRevision(revision: bigint, token: Token, tokenFile: string): LineageError {
+  return new LineageError(
+    `Revision ${revision} of this lineage was already certified with different content by an earlier ` +
+      `interrupted run. It was recovered and written to ${tokenFile}; the requested revision was not appended, ` +
+      `and ${standingAfter(token)}.`,
+    'ALREADY_CERTIFIED',
+  );
+}
+
+/** What an append produced. */
+interface IAppendOutcome {
+  /** True when an earlier run had certified the revision, and this run recovered it. */
+  readonly recovered: boolean;
+  /** Key that signed the appended transfer. */
+  readonly signer: Uint8Array;
+  readonly token: Token;
+}
+
+/** A journal for the token file's next revision, read and decoded. */
+interface IJournalEntry {
+  readonly file: string;
+  readonly pending: IPendingRevision;
+  readonly transaction: TransferTransaction;
+}
+
+/**
+ * Append the requested revision, journaling it first, so that a run interrupted
+ * after certification can be recovered by the next one.
+ *
+ * Journals are per transfer, and one is removed only once its outcome is known:
+ * when the token file holds its revision, or when the slot it would fill is shown,
+ * by a proof that verifies, to hold another transfer. "Not certified yet" is not an
+ * outcome: aggregator-go can still certify a request that was waiting for its round.
+ *
+ * - Journals left by earlier runs are dealt with first. Those whose revision the
+ *   token file holds are removed. Each one for the next revision is looked up; one
+ *   that was certified is written to the token file, and every other journal for
+ *   that revision removed. Those whose slot holds another transfer are removed.
+ *   The rest are kept and listed on stderr whatever `--quiet` says.
+ * - The requested revision is then journaled, echoed to stderr unless `--quiet`,
+ *   and submitted. Once it is certified, the token file is written and every
+ *   journal for the revision removed: none of the others can be certified now.
+ * - If its slot turns out to be taken (`ALREADY_CERTIFIED`), its journal is
+ *   removed and the revision echoed whatever `--quiet` says, so the user can see
+ *   what this run tried; then the kept journals are looked up again, since one of
+ *   them may be what took the slot.
+ * - On a refusal, only a journal this run created is removed; on a timeout or any
+ *   other failure, every journal stays.
+ *
+ * @param {IStampRevisionConfig} config Resolved configuration.
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {ICommandContext} context Streams.
+ * @param {ICertifyOptions} options Certification options.
+ * @param {Token} token The token file's lineage.
+ * @returns {Promise<IAppendOutcome>} The appended token.
+ */
+async function appendJournaled(
+  config: IStampRevisionConfig,
+  client: StateTransitionClient,
+  context: ICommandContext,
+  options: ICertifyOptions,
+  token: Token,
+): Promise<IAppendOutcome> {
+  const trustBase = config.network.trustBase;
+  // Before any journal is acted on, in either direction.
+  await assertValidLineage(token, trustBase);
+
+  // Write the token over the file this run started from. If the file changed meanwhile,
+  // leave it: when it already holds this run's revision, nothing is lost, and the run
+  // goes on as if it had written it; otherwise this run's token goes to stderr as hex,
+  // its journals stay, and it stops.
+  const base = config.tokenBytes as Uint8Array;
+  const persist = async (result: Token): Promise<void> => {
+    const bytes = result.toCBOR();
+    if ((await writeRevisionToken(config.tokenFile, bytes, { base, kind: 'append' }, context)) === 'written') {
+      return;
+    }
+    if (await fileHoldsRevision(config.tokenFile, result, trustBase)) {
+      context.stderr.write(alreadyHeldNote(config.tokenFile, BigInt(result.transactions.length)));
+      return;
+    }
+    context.stderr.write(revisionRecoveryLines(bytes));
+    throw usageError(
+      `${config.tokenFile} changed while this run was working, so it was not replaced. This run's token is ` +
+        'printed above as hex, and its journal is kept, so running stamp-revision again on the current token ' +
+        'file can recover the revision if it belongs there.',
+    );
+  };
+
+  // Every journal still kept for the next revision, this run's own included once written.
+  const kept = new Map<string, IJournalEntry>();
+  const removeKept = async (): Promise<void> => {
+    for (const file of kept.keys()) {
+      await removeJournal(file);
+    }
+    kept.clear();
+  };
+
+  // A recovered revision fills the slot, so it is written and every journal for its
+  // revision removed; then either it was the revision asked for, or the request
+  // cannot go ahead.
+  const settle = async (entry: IJournalEntry, recovered: Token): Promise<IAppendOutcome> => {
+    await persist(recovered);
+    await removeJournal(entry.file);
+    await removeKept();
+    if (await isSameRevision(entry.transaction, entry.pending.revision, config.digest, config.recipientKey)) {
+      context.stderr.write(recoveredRevisionLine(entry.pending.revision, entry.file));
+      return { recovered: true, signer: currentProducerKey(token) as Uint8Array, token: recovered };
+    }
+    writePending(context, entry.pending, entry.file, 'recovered');
+    throw recoveredOtherRevision(entry.pending.revision, recovered, config.tokenFile);
+  };
+
+  // Look up each kept journal: settle the one that was certified, and drop those
+  // whose slot is shown to hold another transfer. With `tolerant`, a failed lookup
+  // keeps the journal instead of failing the run.
+  const recoverKept = async (tolerant: boolean): Promise<IAppendOutcome | null> => {
+    for (const entry of [...kept.values()]) {
+      let recovered: Token | null;
+      try {
+        recovered = await recoverRevision(client, trustBase, token, entry.transaction, options);
+      } catch (error) {
+        if (error instanceof LineageError && error.code === 'ALREADY_CERTIFIED') {
+          // Its slot holds another transfer, shown by a proof that verifies: it never will be certified.
+          kept.delete(entry.file);
+          await removeJournal(entry.file);
+          continue;
+        }
+        if (tolerant) {
+          continue;
+        }
+        throw error;
+      }
+      if (recovered !== null) {
+        kept.delete(entry.file);
+        return settle(entry, recovered);
+      }
+    }
+    return null;
+  };
+
+  for (const file of await findJournals(config.tokenFile)) {
+    const pending = await readJournal(file);
+    if (pending === null) {
+      continue;
+    }
+    const standing = await journalStanding(file, pending, token, config.tokenFile);
+    if (standing.kind === 'written') {
+      await removeJournal(file);
+    } else {
+      kept.set(file, { file, pending, transaction: standing.transaction });
+    }
+  }
+  const earlier = await recoverKept(false);
+  if (earlier !== null) {
+    return earlier;
+  }
+
+  const prepared = await prepareRevision(token, trustBase, config.digest, config.privateKey, config.recipientKey);
+  const pending = pendingRevision(token, prepared, config.digest, config.recipientKey);
+  const journalFile = journalPath(config.tokenFile, pending.transaction);
+  // An earlier run's journal for this very transfer is this run's journal too.
+  kept.delete(journalFile);
+  for (const entry of kept.values()) {
+    // Not subject to --quiet: this is the only notice that an earlier run's revision is still open.
+    writePending(context, entry.pending, entry.file, 'unresolved');
+  }
+  const created = await writeJournal(journalFile, pending);
+  if (!config.quiet) {
+    writePending(context, pending, journalFile, 'submitting');
+  }
+
+  let appended: Token;
+  let replayed = false;
+  try {
+    appended = await certifyRevision(client, trustBase, token, prepared, {
+      ...options,
+      onAlreadyCertified: (): void => {
+        replayed = true;
+      },
+    });
+  } catch (error) {
+    if (error instanceof StampError) {
+      // Refused outright: this request certified nothing. A journal an earlier run
+      // wrote for the same transfer stays, since that run's request was a separate one.
+      if (created) {
+        await removeJournal(journalFile);
+      }
+    } else if (error instanceof LineageError && error.code === 'ALREADY_CERTIFIED') {
+      await removeJournal(journalFile);
+      writePending(context, pending, journalFile, 'rejected');
+      // Another transfer holds the slot; it may be one an earlier run journaled.
+      const recovered = await recoverKept(true);
+      if (recovered !== null) {
+        return recovered;
+      }
+    }
+    throw error;
+  }
+
+  await persist(appended);
+  await removeJournal(journalFile);
+  await removeKept();
+  return { recovered: replayed, signer: new SigningService(config.privateKey).publicKey, token: appended };
+}
+
+/**
+ * Refuse to hand out a recovered genesis whose lineage has moved on: a file with
+ * only revision 0 would be out of date, yet look like a fresh lineage. When the
+ * aggregator cannot be asked, or shows a proof that does not verify, the genesis
+ * is written anyway, with a warning: it is certified and correct, and losing a
+ * good recovery over a secondary check would be worse.
+ *
+ * @param {StateTransitionClient} client Aggregator client.
+ * @param {RootTrustBase} trustBase Trust base of the token's network.
+ * @param {Token} token The recovered genesis.
+ * @param {ICommandContext} context Streams and interrupt signal.
+ * @throws {LineageError} `SUPERSEDED` if the aggregator proves a later revision exists.
+ */
+async function assertNotSuperseded(
+  client: StateTransitionClient,
+  trustBase: RootTrustBase,
+  token: Token,
+  context: ICommandContext,
+): Promise<void> {
+  let lookup: SuccessorLookup;
+  try {
+    lookup = await findSuccessor(client, trustBase, token, context.interrupt);
+  } catch (error) {
+    context.stderr.write(
+      warningLine(`Could not check whether the lineage has later revisions: ${errorMessage(error)}`),
+    );
+    return;
+  }
+  if (lookup.kind === 'spent') {
+    throw new LineageError(
+      supersededLineageMessage(token.id.bytes, lookup.proof.referenceTime, currentProducerKey(token)),
+      'SUPERSEDED',
+    );
+  }
+  if (lookup.kind === 'unverified') {
+    context.stderr.write(
+      warningLine(
+        'The gateway showed a proof of a later revision that does not verify; could not check whether the ' +
+          'lineage has moved on.',
+      ),
+    );
+  }
+}
+
+function latestCertified(token: Token): CertifiedMintTransaction | CertifiedTransferTransaction {
+  return token.transactions.at(-1) ?? token.genesis;
+}
+
+/**
+ * Say what to change when the token file is from another network than the one
+ * this run is set to. Not inferred from the token: the network also picks the
+ * gateway the API key is sent to, so the user chooses it, as for a genesis.
+ *
+ * @param {string} tokenFile Token file path, for the message.
+ * @param {number} tokenNetworkId Network id the token carries.
+ * @param {number} configuredNetworkId Network id of the configured trust base.
+ * @param {string|null} trustBasePath The configured trust base file, or null for a bundled one.
+ * @returns {Error|null} A usage error, or null when the networks agree.
+ */
+export function networkMismatch(
+  tokenFile: string,
+  tokenNetworkId: number,
+  configuredNetworkId: number,
+  trustBasePath: string | null,
+): Error | null {
+  if (tokenNetworkId === configuredNetworkId) {
+    return null;
+  }
+  const bundled = networkNameForId(tokenNetworkId);
+  const lineage =
+    bundled === undefined
+      ? `${tokenFile} is a lineage on network ${tokenNetworkId}, which has no bundled trust base`
+      : `${tokenFile} is a ${networkLabel(tokenNetworkId)} lineage`;
+  const configured =
+    trustBasePath === null
+      ? `this run is set to ${networkLabel(configuredNetworkId)}`
+      : `the trust base ${trustBasePath} is for ${networkLabel(configuredNetworkId)}`;
+  let advice: string;
+  if (bundled === undefined) {
+    advice =
+      trustBasePath === null
+        ? "Pass --trust-base with that network's trust base, and --gateway with its gateway."
+        : "Pass --trust-base with that network's trust base instead.";
+  } else {
+    advice =
+      trustBasePath === null
+        ? `Pass --network ${bundled}, or set UNICITY_NETWORK=${bundled}.`
+        : `Pass a trust base for ${bundled}, or drop the trust base (--trust-base or UNICITY_TRUST_BASE) ` +
+          `and pass --network ${bundled}.`;
+  }
+  return usageError(`${lineage}, but ${configured}. ${advice} Nothing was submitted.`);
+}
+
+/**
+ * The part of `stamp-revision` after configuration: certify, write, report. Takes
+ * the client as a parameter so it can run against an in-memory aggregator.
+ *
+ * @param {IStampRevisionConfig} config Resolved configuration.
+ * @param {StateTransitionClient} client Aggregator client for `config.network`.
+ * @param {ICommandContext} context Streams and interrupt signal.
+ * @returns {Promise<number>} Exit code.
+ */
+export async function stampRevisionWith(
+  config: IStampRevisionConfig,
+  client: StateTransitionClient,
+  context: ICommandContext,
+): Promise<number> {
+  const trustBase = config.network.trustBase;
+  const options = {
+    onWarning: (message: string): void => {
+      context.stderr.write(warningLine(message));
+    },
+    signal: context.interrupt,
+    timeoutMs: config.timeoutMs,
+  };
+
+  let token: Token;
+  let signer = new SigningService(config.privateKey).publicKey;
+  let recovered: boolean;
+  const created = config.tokenBytes === null;
+  if (config.tokenBytes === null) {
+    ({ recovered, token } = await createOrRecoverLineage(
+      client,
+      trustBase,
+      config.digest,
+      config.privateKey,
+      config.recipientKey,
+      options,
+    ));
+    if (recovered) {
+      await assertNotSuperseded(client, trustBase, token, context);
+    }
+    await writeRevisionToken(config.tokenFile, token.toCBOR(), { force: config.force, kind: 'new' }, context);
+    if (recovered) {
+      // Not subject to --quiet: without it, two files can pass for two lineages.
+      context.stderr.write(existingLineageNote(token.id.bytes));
+    }
+  } else {
+    const decoded = await decodeToken(tokenBytesFromInput(config.tokenBytes));
+    if (decoded.token === null) {
+      throw new CliError(
+        `${config.tokenFile} is ${decoded.error}. If an earlier stamp-revision run failed while creating a new ` +
+          'lineage, move this file away and run the same command again: the lineage is recovered.',
+        EXIT_VERIFICATION_FAILED,
+      );
+    }
+    // Before the journal is read: a journal is only acted on against the right network.
+    const mismatch = networkMismatch(
+      config.tokenFile,
+      decoded.token.networkId.id,
+      trustBase.networkId.id,
+      config.trustBasePath,
+    );
+    if (mismatch !== null) {
+      throw mismatch;
+    }
+    const release = await acquireAppendLock(config.tokenFile);
+    try {
+      // Under the lock: a run that finished between this run's read and its lock moved the file on.
+      const current = await NODE_FILE_SYSTEM.readFile(config.tokenFile).catch(() => null);
+      if (current === null || !areUint8ArraysEqual(current, config.tokenBytes)) {
+        throw usageError(
+          `${config.tokenFile} changed since this run read it, so nothing was submitted. Run the command again.`,
+        );
+      }
+      ({ recovered, signer, token } = await appendJournaled(config, client, context, options, decoded.token));
+    } finally {
+      await release();
+    }
+  }
+
+  const latest = latestCertified(token);
+  const certificate = latest.inclusionProof.unicityCertificate;
+  const summary = {
+    created,
+    digest: config.digest,
+    epoch: certificate.unicitySeal.epoch,
+    gatewayUrl: config.network.gatewayUrl,
+    networkId: token.networkId.id,
+    nextProducer: config.recipientKey,
+    recovered,
+    referenceTime: latest.referenceTime,
+    revision: BigInt(token.transactions.length),
+    roundNumber: certificate.inputRecord.roundNumber,
+    roundTimestamp: certificate.inputRecord.timestamp,
+    signer,
+    tokenFile: config.tokenFile,
+    tokenId: token.id.bytes,
+  };
+  context.stdout.write(context.json ? toJsonLine(revisionJson(summary)) : `${revisionText(summary)}\n`);
+  return EXIT_OK;
+}
+
+/**
+ * `stamp-revision`: create a document lineage token for an initial revision, or
+ * append the next revision to an existing one.
+ *
+ * @param {string} [digestArgument] Positional digest.
+ * @param {IStampRevisionFlags} flags Command flags.
+ * @param {ICommandContext} context Streams and interrupt signal.
+ * @returns {Promise<number>} Exit code.
+ */
+export async function runStampRevision(
+  digestArgument: string | undefined,
+  flags: IStampRevisionFlags,
+  context: ICommandContext,
+): Promise<number> {
+  const config = await resolveStampRevisionConfig(digestArgument, flags);
+  const client = new StateTransitionClient(
+    new AggregatorClient(config.network.gatewayUrl, config.apiKey, config.allowInsecure),
+  );
+  return stampRevisionWith(config, client, context);
+}

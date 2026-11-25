@@ -36,7 +36,7 @@ Arguments are loaded, in order of precedence, from: flags > variables in shell m
 | Variable | Flag | Meaning | Default |
 | --- | --- | --- | --- |
 | `UNICITY_API_KEY` | `--api-key` | Gateway API key. Needed by `stamp` only. | none |
-| `UNICITY_NETWORK` | `--network` | `mainnet` or `testnet2`. Selects the gateway and the bundled trust base for `stamp`. `verify` reads the network from the token; only its `--network` flag overrides that. | `mainnet` |
+| `UNICITY_NETWORK` | `--network` | `mainnet` or `testnet2`. Selects the gateway and the bundled trust base for `stamp` and `stamp-revision`; an append must name the network its token is from. `verify` reads the network from the token; only its `--network` flag overrides that. | `mainnet` |
 | `UNICITY_PRIVATE_KEY` | `--key-file` | secp256k1 private key, 64 hex characters. When set, stamps are signed. | none, stamps are anonymous |
 | `UNICITY_GATEWAY_URL` | `--gateway` | Override the gateway URL only. | preset gateway |
 | `UNICITY_TRUST_BASE` | `--trust-base` | Override the bundled trust base file. **Not** read from an automatically discovered `./.env` — see below. | bundled file |
@@ -105,12 +105,85 @@ a bare hex line or, with `--json`, as the object's `privateKey`. That field is
 present on this path only: a key written to a file stays in the file, and the
 JSON reports its path and public key alone.
 
+`keygen` writes the key to a new file that is 0600 from creation and puts it in place only when complete, so the key is never visible through a wider file. It never writes through a symlink: without `--force` a symlink at `--out` is refused like any existing file, and with `--force` the link itself is replaced.
+
 Or put `UNICITY_PRIVATE_KEY=<64 hex>` in `.env` and every stamp is signed. Two flags control this explicitly:
 
 - `--sign` fails with exit code 2 unless a key is configured. Use it in scripts that must never produce an anonymous stamp.
 - `--anonymous` produces an unsigned stamp even when a key is configured.
 
 The signer's compressed public key is printed on every `stamp` and `verify`, as `Signer`, or `none` for anonymous stamps. Publish your public key wherever people need to recognise it; the key alone does not say who you are.
+
+### Stamp revisions (document lineage)
+
+`stamp-revision` links successive revisions of a document in one *lineage token*
+(design: [#13](https://github.com/unicitynetwork/proof-cli/issues/13#issuecomment-6440959902)).
+Each call certifies one revision and either names who may produce the next, or finalizes the document:
+
+```bash
+# Revision 0: creates doc.lineage, signed by alice, and names bob as the next producer.
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file alice.key --recipient-key <bob's public key>
+# Revision 1: only bob's key can append; bob names carol (key read from a file holding 66 hex characters).
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file bob.key --recipient-key-file carol.pub
+# Revision 2: carol finalizes the document; no revision can follow.
+unicity-proof stamp-revision --file doc.pdf --token-file doc.lineage --key-file carol.key --finalize
+```
+
+- Exactly one of `<sha256-hex>` and `--file`, and exactly one of `--recipient-key`, `--recipient-key-file` and `--finalize`, is required. `--token-file` and `--key-file` are always required; `UNICITY_PRIVATE_KEY` is not consulted.
+- If `--token-file` does not exist, a new lineage is minted. Its mint reason is the `--key-file` holder's signature over the token id, type, recipient and revision, which is what makes the origin "accepted". Because the recipient is signed, the issuer names the producer of revision 1 (or the burn, with `--finalize`), just as each later revision names its successor: whoever submits the mint cannot substitute another.
+- **The token id identifies the lineage, and nothing else does.** It is printed when the lineage is created, marked `(identifies this lineage; give it to verifiers)`; pass it on through a channel the verifiers trust, and have them check it with `verify --token-id`. The issuer key and the first revision's hash are not enough: the same issuer can start any number of certified lineages from the same document, each with its own fork-free history, and verification cannot tell them apart.
+- The salt, and so the token id, is derived from the issuer's private key, the recipient and revision 0, not drawn at random. Running an interrupted genesis again with the same file, key, digest and recipient therefore recovers the same lineage instead of starting a parallel one. Nobody without the issuer's key can compute the token id before the genesis is certified, so nobody can mint into its slot first. Starting a second, separate lineage from the same document needs a different first producer (or issuer).
+- **A genesis that was already certified is recovered, never re-created.** Whether the earlier run was interrupted, its token file went elsewhere, or a second lineage was meant, the same inputs give the same lineage:
+  - The output says `Revision 0  (existing lineage, recovered)`, and a note on stderr, printed even with `--quiet`, says that this is the existing lineage and how to start a separate one.
+  - Before writing, the command asks the aggregator whether revision 1 exists. If it shows a proof that verifies against the trust base, the lineage has moved on: nothing is written, and the command exits 1, naming the token id, when revision 1 was certified and by whom. Get the current token file from whoever holds the lineage.
+  - If the aggregator cannot be asked, or shows a proof that does not verify, the file is written with a warning. The check can find later revisions but never rule them out: the aggregator issues no proofs of absence.
+- A new lineage's token file is created exclusively. If a file appears at `--token-file` while the genesis is being certified, it is left alone and the command exits 2; the genesis is printed as hex, and running the same command with another `--token-file` recovers it there. A `--token-file` that is a symlink to a missing file is refused the same way. `--force` overwrites a file that appeared, or creates the file a symlink points to. It only applies to a new lineage: with an existing token file, `--force` is a usage error, because the file would be appended to and never replaced.
+- If it exists, it must be a valid lineage token for the selected network whose latest revision names the `--key-file` key; otherwise the command fails before contacting the gateway (exit 1 for an invalid token, 2 for the wrong key). The revision is a transfer signed with that key under its `P_sig` predicate; its recipient is `P_sig` of the next producer. On any write failure the full token is printed as hex.
+- **The token file never holds a partial token.** It is written to a temporary file next to it, fsynced, and only then put in place (linked for a new lineage, renamed over the old file for an append), and the directory is fsynced after that. A failed or interrupted write leaves the previous file, or for a new lineage no file at all. An append keeps the file's mode, and if `--token-file` is a symlink, for example into a shared or synced folder, the file it points to is updated and the link is kept. On a filesystem without hard links, a new lineage is created in place instead and removed again if the write fails; only a crash during that write can leave a partial file. If a token file is not a token, the error says how to recover: move it away and run the same command again.
+- `--finalize` makes this revision the final one, a *seal*: its auxiliary data is `CBOR["seal", i, SHA-256(doc_i)]` and its recipient is the burn predicate `P_burn(SHA-256(auxiliary data))`, which no key can unlock. Appending to a finalized lineage fails before contacting the gateway (exit 2). On a new lineage, `--finalize` mints revision 0 as a seal: a single-revision document that is final from the start.
+- **One append at a time.** An append holds a lock file next to the token file, `.<name>.lock` (after symlinks are resolved), from before it reads any journal until it has written the token file. A second append to the same file meanwhile exits 2 before submitting anything, naming the process that holds the lock. The lock is removed when the run ends, also after an error, a timeout or Ctrl-C; only a run that is killed outright, or a power loss, leaves it behind. It holds no data, so when no run is active it is always safe to delete. An append also exits 2, before submitting, if the token file changed between being read and being locked: run it again on the current file.
+- **Another `stamp-revision` run never rolls the token file back.** The lock makes sure of that between runs. On top of it, an append replaces the token file only if it still holds what the run started from, so a program that ignores the lock is caught too, unless it writes in the instant between that check and the replace: there is no atomic compare-and-replace. If the file changed, it is left as it is. When it already holds this run's revision (the same lineage, verified, and the same transfer), nothing is lost: the run says so on stderr and completes. Otherwise the run prints its token as hex, keeps its journal, and exits 2.
+- **Interrupted appends are recovered from a journal.** Before an append is submitted, the revision is recorded in a journal next to the token file, `.<name>.<tag>.pending`, where the tag is the first 16 hex digits of the transfer's SHA-256 (for example `.doc.lineage.3f2a9c0e1b7d4a65.pending`), and echoed to stderr; `--quiet` leaves the echo out once the journal is written. A journal is removed only once its outcome is known: when the token file holds its revision, or when a proof that verifies shows its revision's slot holds another transfer. The aggregator keeps only a hash of each transfer, so until then the journal is the only record of what was certified; do not delete it by hand.
+  - If the command is interrupted after submitting, running `stamp-revision` again on the same token file recovers the revision from the journal, whatever it is given this time. If the digest and recipient are the same, that completes the command. If not, the recovered revision is still written and echoed to stderr, the requested one is not appended, and the command exits 1.
+  - Without the journal, the same command with the same file, key, digest and recipient still recovers the revision, because the state mask of each step is derived from the producer's key and the spent state. With any other digest or recipient it exits 1, saying the revision was already certified with different content, and echoes what it tried to stderr even with `--quiet`. Only the interrupted run's digest and recipient can recover it then, which is what the echo is for.
+  - A revision that an earlier run submitted but that is not certified yet may still be: the aggregator can certify a request that was waiting for its round. Its journal is kept, and listed on stderr even with `--quiet`, and this run's revision is journaled beside it. Whichever is certified is written to the token file, and the other journals for that revision are then removed. A run that is interrupted again leaves every journal in place for the next one.
+  - Two runs that journal the same transfer share its journal. A journal with the same name and other content stops the command with exit 2, and nothing is removed that the command did not create.
+  - A journal the command cannot place (for another lineage, for a later revision than the token file holds, or unreadable) stops it with exit 2 and is left alone.
+  - A new lineage needs no journal: its genesis is derived from its inputs, and running it again with the same file, key, digest and recipient recovers it (see above).
+- In `--json` output, `recovered` is true when an earlier run had already certified the revision and this run only recovered it; the text output marks such a revision `(recovered)`.
+- Network options behave as for `stamp`, so a testnet2 lineage needs `--network testnet2` (or `UNICITY_NETWORK=testnet2`) on every append, not just at creation. The network is not taken from the token, because it also decides which gateway the API key is sent to. An append whose token file is from another network than the one configured stops with exit 2 before anything is submitted, and the message says what to change.
+
+`verify` and `inspect` recognise lineage tokens by their token type and list every revision with its hash, signer, next producer and certification time:
+
+```bash
+unicity-proof verify doc.lineage                                   # is this a valid lineage?
+unicity-proof verify doc.lineage --token-id <id from the issuer>   # ...and the one I was given?
+unicity-proof verify doc.lineage --token-id <id> --file doc.pdf    # ...and which revision is this file?
+```
+
+```
+Status         OK  (inclusion proofs, consensus signatures, issuer signature and revision chain verified against the bundled testnet2 trust base)
+Trust base     bundled testnet2 pin
+Expected hash  matches revision 1; superseded by revision 2
+Lineage id     matches
+Token type     document lineage
+Network        testnet2 (4)
+Token id       5394db437e25b271272701e70e3f211ab4be2449fbe5b5d33664afa630b92357
+Issuer         031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f
+Revisions      3
+Next producer  034bf90f6fb27ac089cd5649adf2cf28c8d9711c66e5191cbceef04a2b7c85a368
+
+Revision 0     SHA-256 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  Signed by    031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f
+  Passes to    034bf90f6fb27ac089cd5649adf2cf28c8d9711c66e5191cbceef04a2b7c85a368
+  Certified at 2026-11-05T11:45:48Z  (reference time 1793879148)
+  Round        184233  (round timestamp 1793879149, epoch 1)
+…
+```
+
+With `--token-id`, the lineage passes only if its token id is that one; `Lineage id` says whether it matched, or that it was not checked, in which case nothing has established *which* lineage this is. A different id is a failure, reported before any hash mismatch. `--token-id` is refused for tokens that are not lineages. With `--file` or `--hash`, the lineage passes if any revision carries that digest; `Expected hash` says which one, and whether a later revision supersedes it. A match on the last revision is marked `(the final)` when that revision is a seal, and `(the latest in this file)` otherwise. Only a seal (`--finalize`) proves that no later revision exists: every earlier state of a lineage is itself a valid token, so an unsealed file can be missing revisions certified since, whether through an old copy or trailing revisions dropped, and verification, being offline, cannot tell. A digest no revision carries is a failure. `Signed by` on revision 0 is the issuer from the genesis reason; on later revisions it is the key the previous revision passed to, which the transfer's signature was checked against. `Next producer` is who may append the next revision, or `none; the lineage is finalized` after a seal, which is marked `(final)`. In `--json` output a lineage has `"tokenType": "lineage"`, `finalized`, a `revisions` array (each with `sealed`), `expectedTokenIdMatches` (null when no `--token-id` was given) and `matchingRevisions` (positions of the matching revisions, or null when no hash was given) in place of the timestamp fields.
+
+Format: token type `SHA-256("unicity-document-lineage")`; auxiliary data `CBOR[i, SHA-256(doc_i)]` on the genesis (`i = 0`) and on each transfer, or `CBOR["seal", i, SHA-256(doc_i)]` on the final revision, whose recipient is then the burn predicate with reason `SHA-256(auxiliary data)`; genesis reason CBOR tag 39200 over `[1, issuer public key, signature]`, the signature covering `SHA-256(CBOR["unicity-document-lineage", 1, token id, token type, recipient, auxiliary data])`, where `recipient` is the mint's recipient predicate in its tagged CBOR encoding (tag 39032). Verification additionally requires the indices to increase by one, the reference times not to decrease along the chain, and a revision to be burned exactly when it is a seal, with the burn reason as above.
 
 ### Verify
 
@@ -143,7 +216,7 @@ The `Trust base` line says which root of trust produced that verdict — `bundle
 unicity-proof inspect document.cbor
 ```
 
-Prints the same fields as `verify` without checking anything, under an `UNVERIFIED` banner. Useful for looking at tokens from other networks or other token types.
+Prints the same fields as `verify` without checking anything, under an `UNVERIFIED` banner. Useful for looking at tokens from other networks or other token types. A lineage token is shown revision by revision, as by `verify`.
 
 ### Scripting
 
@@ -155,8 +228,8 @@ unicity-proof verify document.cbor --file document.pdf --json | jq -r .reference
 
 | Exit code | Meaning |
 | --- | --- |
-| 0 | Success. For `verify`: valid, and the hash matched if one was given. |
-| 1 | Verification failed, hash mismatch, or the input is not a token. |
+| 0 | Success. For `verify`: valid, and the hash (and, for a lineage, the token id) matched if one was given. |
+| 1 | Verification failed, hash or token id mismatch, or the input is not a token. For `stamp-revision`: the revision was already certified with different content, or a recovered genesis's lineage has moved on. |
 | 2 | Usage or configuration error. |
 | 3 | Network error, aggregator rejection, or timeout. |
 | 130 | Interrupted. |
