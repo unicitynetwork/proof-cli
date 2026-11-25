@@ -173,13 +173,17 @@ async function fileHoldsRevision(tokenFile: string, token: Token, trustBase: Roo
       index < 0 ||
       !areUint8ArraysEqual(current.id.bytes, token.id.bytes) ||
       current.transactions.length <= index ||
-      // The same transfer: its proof may differ, served under a later root, but not what it certifies.
+      // A cheap pre-check: once the file verifies, it can only hold this transfer here,
+      // since a valid lineage has one transfer per slot. Compared by hash, because the
+      // copies' proofs may be served under different roots.
       !(await current.transactions[index].calculateTransactionHash()).equals(
         await token.transactions[index].calculateTransactionHash(),
       )
     ) {
       return false;
     }
+    // The check that matters: a corrupted copy of the same lineage does not hold anything,
+    // and leaving it in place would drop this run's valid token without a trace.
     return (await verifyLineage(current, trustBase)).status === 'OK';
   } catch {
     return false;

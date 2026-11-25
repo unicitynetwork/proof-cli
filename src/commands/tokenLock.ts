@@ -1,9 +1,10 @@
-import { open, readFile, realpath, rm } from 'node:fs/promises';
+import { readFile, realpath, rm } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
-import { usageError } from '../errors.js';
+import { IDurableFileSystem, NODE_FILE_SYSTEM, writeExclusive } from './durableFile.js';
 import { hasErrorCode } from './revisionJournal.js';
+import { usageError } from '../errors.js';
 
 const LOCK_FORMAT = 'unicity-proof/append-lock';
 
@@ -43,11 +44,19 @@ function describeHolder(text: string): string {
  * are resolved, so every path to the same file shares one lock. It holds no data:
  * it only says who holds it, and deleting it when no run is active is always safe.
  *
+ * The lock is created with {@link writeExclusive}, so a lock whose contents
+ * cannot be written is removed again: it is this run's, and left behind it would
+ * refuse every later append until someone deleted it.
+ *
  * @param {string} tokenFile Absolute token file path; it must exist.
+ * @param {IDurableFileSystem} [fs] File operations, for tests.
  * @returns {Promise<() => Promise<void>>} Releases the lock; never fails.
  * @throws {CliError} If another run holds the lock, or it cannot be taken; nothing has been submitted then.
  */
-export async function acquireAppendLock(tokenFile: string): Promise<() => Promise<void>> {
+export async function acquireAppendLock(
+  tokenFile: string,
+  fs: IDurableFileSystem = NODE_FILE_SYSTEM,
+): Promise<() => Promise<void>> {
   let file: string;
   try {
     file = lockPath(await realpath(tokenFile));
@@ -61,9 +70,8 @@ export async function acquireAppendLock(tokenFile: string): Promise<() => Promis
     started: new Date().toISOString(),
   };
   const contents = `${JSON.stringify(json, null, 2)}\n`;
-  let handle;
   try {
-    handle = await open(file, 'wx', 0o644);
+    await writeExclusive(fs, file, new TextEncoder().encode(contents), 0o644);
   } catch (error) {
     if (hasErrorCode(error, 'EEXIST')) {
       const holder = describeHolder(await readFile(file, 'utf8').catch(() => ''));
@@ -74,11 +82,6 @@ export async function acquireAppendLock(tokenFile: string): Promise<() => Promis
       );
     }
     throw usageError(`Cannot create the lock file ${file}; nothing was submitted.`, { cause: error });
-  }
-  try {
-    await handle.writeFile(contents);
-  } finally {
-    await handle.close();
   }
   return async (): Promise<void> => {
     // Only this run's lock: if someone deleted it as stale while this run was going,

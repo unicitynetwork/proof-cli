@@ -21,7 +21,7 @@ import { networkMismatch, stampRevisionWith } from '../../src/commands/stampRevi
 import { IStampRevisionConfig } from '../../src/config.js';
 import { EXIT_USAGE, EXIT_VERIFICATION_FAILED, toExitCode } from '../../src/errors.js';
 import { StampError } from '../../src/lib/errors.js';
-import { appendRevision, prepareRevision } from '../../src/lib/LineageClient.js';
+import { appendRevision, createLineage, prepareRevision } from '../../src/lib/LineageClient.js';
 import { verifyLineage } from '../../src/lib/LineageVerification.js';
 import { bundledTrustBase } from '../../src/lib/networks.js';
 import {
@@ -827,6 +827,38 @@ describe('stampRevisionWith', () => {
         return second.toCBOR();
       }
       const testKey = HexConverter.decode(TEST_PUBLIC_KEY_HEX);
+
+      // MastaP on PR #16: nothing pinned the verification in fileHoldsRevision. A copy of
+      // the same lineage, with the same transfers, whose proofs do not verify against this
+      // run's trust base, must not count as holding the revision.
+      it("does not count a same-lineage file whose proofs don't verify as holding this run's revision", async () => {
+        const forger = TestAggregatorClient.create();
+        const forging = new StateTransitionClient(forger);
+        const fast = { timeoutMs: 2_000 };
+        // The same genesis and revision 1 as this test's, certified elsewhere: the same token id and transfers.
+        const genesis = await createLineage(
+          forging,
+          forger.rootTrustBase,
+          TEST_DIGEST,
+          TEST_PRIVATE_KEY,
+          bobPublic,
+          fast,
+        );
+        expect(genesis.id.bytes).toEqual((await Token.fromCBOR(genesisBytes)).id.bytes);
+        const forged = await appendRevision(forging, forger.rootTrustBase, genesis, OTHER_DIGEST, bob, testKey, fast);
+
+        const gated = new GatedClient(aggregator, 'submit');
+        const sink = testContext();
+        const slow = stampRevisionWith(append({ quiet: true }), new StateTransitionClient(gated), sink.context);
+        await gated.reached;
+        await writeFile(tokenFile, forged.toCBOR());
+
+        gated.release();
+        await expect(slow).rejects.toThrow(`${tokenFile} changed while this run was working, so it was not replaced.`);
+        expect(sink.stderr()).toContain('the revision was certified');
+        expect(new Uint8Array(await readFile(tokenFile))).toEqual(forged.toCBOR());
+        expect(await journalFiles()).toHaveLength(1);
+      });
 
       it("leaves a file that moved on alone when it already holds this run's revision", async () => {
         const gated = new GatedClient(aggregator, 'submit');

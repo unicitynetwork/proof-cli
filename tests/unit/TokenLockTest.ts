@@ -1,6 +1,7 @@
 import { readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { IDurableFileSystem, IWritableFile, NODE_FILE_SYSTEM } from '../../src/commands/durableFile.js';
 import { acquireAppendLock } from '../../src/commands/tokenLock.js';
 import { EXIT_USAGE, toExitCode } from '../../src/errors.js';
 import { tempDir } from '../support/fixtures.js';
@@ -57,4 +58,39 @@ describe('acquireAppendLock', () => {
     await release();
     expect(await readFile(lock, 'utf8')).toEqual('another run, after this one was deleted as stale');
   });
+
+  // MastaP on PR #16: a lock whose setup failed stayed behind and refused every later append.
+  it.each(['writeFile', 'close'] as const)(
+    'removes the lock it created when %s fails, and says nothing was submitted',
+    async (step) => {
+      const failing: IDurableFileSystem = {
+        ...NODE_FILE_SYSTEM,
+        openNew: async (file, mode): Promise<IWritableFile> => {
+          const handle = await NODE_FILE_SYSTEM.openNew(file, mode);
+          const full = Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+          async function writeFile(data: Uint8Array): Promise<void> {
+            if (step === 'writeFile') {
+              throw full;
+            }
+            await handle.writeFile(data);
+          }
+          async function close(): Promise<void> {
+            await handle.close();
+            if (step === 'close') {
+              throw full;
+            }
+          }
+          return { close, sync: (): Promise<void> => handle.sync(), writeFile };
+        },
+      };
+      const attempt = acquireAppendLock(tokenFile, failing);
+      await expect(attempt).rejects.toThrow(
+        /^Cannot create the lock file .*\.doc\.lineage\.lock; nothing was submitted\.$/,
+      );
+      expect(toExitCode(await attempt.catch((error: unknown) => error))).toBe(EXIT_USAGE);
+      expect(await readdir(directory)).toEqual(['doc.lineage']);
+      const release = await acquireAppendLock(tokenFile);
+      await release();
+    },
+  );
 });

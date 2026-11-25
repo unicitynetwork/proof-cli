@@ -231,7 +231,12 @@ async function publishNew(
  * @param {number} mode Mode to create it with, subject to the umask.
  * @throws {NodeJS.ErrnoException} EEXIST, carrying `file` as its path, when the name is taken.
  */
-async function writeExclusive(fs: IDurableFileSystem, file: string, data: Uint8Array, mode: number): Promise<void> {
+export async function writeExclusive(
+  fs: IDurableFileSystem,
+  file: string,
+  data: Uint8Array,
+  mode: number,
+): Promise<void> {
   let handle: IWritableFile;
   try {
     handle = await fs.openNew(file, mode);
